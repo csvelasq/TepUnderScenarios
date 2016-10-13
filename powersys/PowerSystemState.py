@@ -3,7 +3,6 @@ import PowerSystem
 
 class PowerSystemState(object):
     def __init__(self, system, name, duration):
-        assert isinstance(system, PowerSystem.PowerSystem)
         self.system = system
         self.name = name
         self.duration = duration
@@ -20,6 +19,9 @@ class PowerSystemState(object):
     def find_node_state(self, node):
         return next(node_state for node_state in self.node_states if node_state.node == node)
 
+    def __str__(self):
+        return self.name
+
 
 class PowerSystemElementState(object):
     def __init__(self, system_state, element):
@@ -28,14 +30,17 @@ class PowerSystemElementState(object):
         assert isinstance(element, PowerSystem.PowerSystemElement)
         self.element = element
 
+    def __str__(self):
+        return self.element.name
+
 
 class NodeState(PowerSystemElementState):
     def __init__(self, system_state, node,
                  load_state, available_generating_capacity, generation_marginal_cost):
-        assert isinstance(node, PowerSystem.Node)
         PowerSystemElementState.__init__(self, system_state, node)
         self.node = node
         self.load_state = load_state
+        assert available_generating_capacity <= node.installed_generating_capacity
         self.available_generating_capacity = available_generating_capacity
         self.generation_marginal_cost = generation_marginal_cost
 

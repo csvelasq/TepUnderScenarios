@@ -1,7 +1,19 @@
-def merge_dictionaries(dict1, dict2):
-    output = dict((k, [dict1[k], dict2.get(k)]) for k in dict1)
-    output.update((k, [None, dict2[k]]) for k in dict2 if k not in dict1)
-    return output
+"""Mixed independent utilities"""
+import pandas as pd
+
+
+def excel_worksheet_to_dict(excel_filepath, sheetname):
+    df = pd.read_excel(excel_filepath, sheetname=sheetname)
+    d = dict()
+    for index, row in df.iterrows():
+        d[row['PARAMETER']] = row['VALUE']
+    return d
+
+
+def dataframe_to_html(df, html_file):
+    text_file = open(html_file, "w")
+    text_file.write(df.to_html())
+    text_file.close()
 
 
 def powerset(s):

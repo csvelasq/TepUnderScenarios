@@ -10,8 +10,12 @@ class PowerSystemScenario(object):
         self.name = name
         self.states = []
 
+    def __str__(self):
+        return self.name
+
     @staticmethod
     def import_scenarios_from_excel(excel_filepath):
+        # type: (str) -> list[PowerSystemScenario]
         imported_system = pws.PowerSystem.import_from_excel(excel_filepath)
         imported_scenarios = []
         # import ScenariosDefinition

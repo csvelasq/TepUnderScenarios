@@ -10,6 +10,8 @@ class OpfModel(mygrb.GrbOptModel):
         self.state = state
         self.model = model
         self.opf_model_params = opf_model_params
+        if self.opf_model_params.slack_bus is None:
+            self.slack_bus = self.state.system.nodes[0]
         # Model variables
         self.pgen = {}
         self.load_shed = {}
@@ -27,7 +29,7 @@ class OpfModel(mygrb.GrbOptModel):
             self.load_shed[node_state] = self.model.addVar(lb=0,
                                                            ub=node_state.load_state,
                                                            obj=self.opf_model_params.load_shedding_cost * self.state.duration)
-            if node_state == self.opf_model_params.slack_bus:
+            if node_state.node == self.opf_model_params.slack_bus:
                 self.bus_angle[node_state] = self.model.addVar(lb=0,
                                                                ub=0,
                                                                obj=0)
@@ -87,30 +89,47 @@ class OpfModel(mygrb.GrbOptModel):
 
 
 class OpfModelParameters(object):
-    def __init__(self, state, load_shedding_cost=2000,
+    def __init__(self, load_shedding_cost=2000,
                  slack_bus=None,
                  bus_angle_min=-grb.GRB.INFINITY, bus_angle_max=grb.GRB.INFINITY,
                  bus_angle_max_difference=None):
-        self.state = state
         self.load_shedding_cost = load_shedding_cost
         self.slack_bus = slack_bus
-        if slack_bus is None:
-            self.slack_bus = state.find_node_state(self.state.system.nodes[0])
         self.bus_angle_min = bus_angle_min
         self.bus_angle_max = bus_angle_max
         self.bus_angle_max_difference = bus_angle_max_difference
 
 
-class StaticStatesOpfModel(mygrb.GrbOptModel):
-    def __init__(self, states, opf_model_params,
+class ScenarioOpfModel(mygrb.GrbOptModel):
+    def __init__(self, scenario, opf_model_params,
                  model=grb.Model('')):
-        # type: (powersys.PowerSystemState.PowerSystemState, OpfModelParameters, gurobipy.Model) -> None
+        # type: (powersys.PowerSystemScenario.PowerSystemScenario, OpfModelParameters, gurobipy.Model) -> None
         mygrb.GrbOptModel.__init__(self, model)
-        self.states = states
+        self.scenario = scenario
         self.opf_model_params = opf_model_params
         # Build OPF model for each state
-        self.opf_models = []
-        for state in states:
-            opf_model = OpfModel(state, self.opf_model_params, model)
-            self.opf_models.append(opf_model)
+        self.opf_models = dict()
+        for state in self.scenario.states:
+            opf_model = OpfModel(state, self.opf_model_params, self.model)
+            self.opf_models[state] = opf_model
             # TODO build and encapsulate opf static states model results in another class
+
+
+class ScenariosOpfModel(object):
+    def __init__(self, scenarios, opf_model_params):
+        # type: (list[powersys.PowerSystemScenario.PowerSystemScenario], OpfModelParameters) -> None
+        self.scenarios = scenarios
+        self.opf_model_params = opf_model_params
+        # Build independent simulation models for each scenario
+        self.scenarios_models = dict()
+        for scenario in self.scenarios:
+            scenario_model = ScenarioOpfModel(scenario, self.opf_model_params, model=grb.Model(''))
+            self.scenarios_models[scenario] = scenario_model
+            # TODO build and encapsulate opf static states model results in another class
+
+    def solve(self):
+        operation_costs_scenarios = dict()
+        for scenario in self.scenarios:
+            operation_costs_scenario = self.scenarios_models[scenario].solve()
+            operation_costs_scenarios[scenario] = operation_costs_scenario
+        return operation_costs_scenarios

@@ -38,16 +38,22 @@ class PowerSystem(object):
             imported_system.transmission_lines.append(line)
         return imported_system
 
+    def __str__(self):
+        return self.name
+
 
 class PowerSystemElement(object):
-    def __init__(self, system):
-        assert isinstance(system, PowerSystem)
+    def __init__(self, system, name):
         self.system = system
+        self.name = name
+
+    def __str__(self):
+        return self.name
 
 
 class Node(PowerSystemElement):
     def __init__(self, system, name, load, installed_generating_capacity, generation_marginal_cost):
-        PowerSystemElement.__init__(self, system)
+        PowerSystemElement.__init__(self, system, name)
         self.name = name
         self.load = load
         self.installed_generating_capacity = installed_generating_capacity
@@ -56,7 +62,7 @@ class Node(PowerSystemElement):
 
 class TransmissionLine(PowerSystemElement):
     def __init__(self, system, name, node_from, node_to, susceptance, thermal_capacity):
-        PowerSystemElement.__init__(self, system)
+        PowerSystemElement.__init__(self, system, name)
         self.name = name
         self.node_from = node_from
         self.node_to = node_to

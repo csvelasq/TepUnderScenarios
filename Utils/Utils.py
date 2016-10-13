@@ -16,6 +16,13 @@ def dataframe_to_html(df, html_file):
     text_file.close()
 
 
+def print_scalar_attributes_to_console(obj_instance):
+    """Prints all scalar attributes (i.e. of type int, float or str) of obj_instance to console"""
+    for key, val in obj_instance.__dict__.iteritems():
+        if type(val) in (str, int, float):
+            print "{0}: {1}".format(key, val)
+
+
 def powerset(s):
     l = len(s)
     ps = []

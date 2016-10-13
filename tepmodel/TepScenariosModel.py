@@ -3,6 +3,8 @@ import powersys.PowerSystemPlanning as pwsp
 import Utils
 import plotly
 from plotly.graph_objs import Scatter, Layout
+import pandas as pd
+from jinja2 import Environment, PackageLoader
 
 
 class TepScenariosModel(object):
@@ -65,13 +67,10 @@ class StaticTePlan(object):
     @staticmethod
     def from_id(tep_model, plan_id):
         # type: (TepScenariosModel, int) -> StaticTePlan
-        plan = StaticTePlan(tep_model)
-        plan.set_plan_by_id(plan_id)
+        plan = StaticTePlan(tep_model,
+                            candidate_lines_built=Utils.subset_from_id(tep_model.tep_system.candidate_lines,
+                                                                       plan_id))
         return plan
-
-    def set_plan_by_id(self, plan_id):
-        self.candidate_lines_built = Utils.subset_from_id(self.tep_model.tep_system.candidate_lines, plan_id)
-        [self.total_costs, self.operation_costs] = self.tep_model.evaluate_plan(self)
 
     def get_plan_id(self):
         return Utils.subset_to_id(self.tep_model.tep_system.candidate_lines, self.candidate_lines_built)
@@ -89,12 +88,6 @@ class StaticTePlan(object):
                 return False
         return not_equal
 
-    def weakly_dominates(self, other_plan):
-        for self_wvalue, other_wvalue in zip(self.total_costs.values(), other_plan.total_costs.values()):
-            if self_wvalue > other_wvalue:
-                return False
-        return True
-
     def is_nondominated(self, other_plans):
         for other_plan in other_plans:
             if other_plan != self and not self.dominates(other_plan):
@@ -102,7 +95,7 @@ class StaticTePlan(object):
         return True
 
 
-class ScenariosTepParetoFront(object):
+class ScenariosTepParetoFrontByBruteForce(object):
     def __init__(self, tep_model):
         # type: (TepScenariosModel) -> None
         self.tep_model = tep_model
@@ -179,3 +172,38 @@ class ScenariosTepParetoFront(object):
             "data": [trace_efficient, trace_dominated],
             "layout": plot_layout
         })
+
+
+class ScenariosTepParetoFrontByBruteForceSummary(object):
+    """Summarizes results of a TEP pareto front"""
+
+    def __init__(self, pareto_brute):
+        # type: (ScenariosTepParetoFrontByBruteForce) -> None
+        # dataframe with the summary solution for each alternative
+        df_column_names = ['Plan ID',
+                           'Kind',
+                           'Built Lines',
+                           'Investment Cost [MMUS$]']
+        for scenario in pareto_brute.tep_model.tep_system.scenarios:
+            df_column_names.append('Operation Costs {0} [MMUS$]'.format(scenario.name))
+            df_column_names.append('Total Costs {0} [MMUS$]'.format(scenario.name))
+        self.df_alternatives = pd.DataFrame(columns=df_column_names)
+        n = 0
+        for alternative in pareto_brute.alternatives:
+            kind = 'Efficient' if alternative in pareto_brute.efficient_alternatives else 'Dominated'
+            row = [alternative.get_plan_id(),
+                   kind,
+                   map(str, alternative.candidate_lines_built),
+                   alternative.get_total_investment_cost()]
+            for scenario in pareto_brute.tep_model.tep_system.scenarios:
+                row.append(alternative.operation_costs[scenario])
+                row.append(alternative.total_costs[scenario])
+            self.df_alternatives.loc[n] = row
+            n += 1
+
+    def to_html(self, html_filename):
+        env = Environment(loader=PackageLoader('tepmodel', 'templates'))
+        template = env.get_template('pareto_brute_force_template.html')
+        output_from_parsed_template = template.render(data=self.df_alternatives.to_html())
+        with open(html_filename, "wb") as fh:
+            fh.write(output_from_parsed_template)

@@ -6,10 +6,10 @@ class PowerSystemState(object):
         self.system = system
         self.name = name
         self.duration = duration
-        self.node_states = []
+        self.node_states = []  # type: List[NodeState]
         for node in self.system.nodes:
             self.node_states.append(NodeState(self, node, 0.0, 0.0, 0.0))
-        self.transmission_lines_states = []
+        self.transmission_lines_states = []  # type: List[TransmissionLineState]
         for line in self.system.transmission_lines:
             self.transmission_lines_states.append(TransmissionLineState(self, line, True))
             # self.available_lines_states = (line_state for line_state

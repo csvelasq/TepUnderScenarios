@@ -40,10 +40,18 @@ class PowerSystemTransmissionPlanning(object):
         """Modifies internal scenarios and their states to activate only the selected candidate transmission lines,
         and deactivating all other candidate transmission lines"""
         # type: (list[CandidateTransmissionLine]) -> None
+        # commit to each state in each scenario
         for scenario in self.scenarios:
             for state in scenario.states:
-                for line in state.transmission_lines_states:
-                    line.isavailable = line in lines_to_build
+                # check only for candidate transmission lines
+                for line_state in state.transmission_lines_states:
+                    if self.transmission_line_is_candidate(line_state.transmission_line):
+                        line_state.isavailable = line_state.transmission_line in (l.transmission_line
+                                                                                  for l in lines_to_build)
+
+    def transmission_line_is_candidate(self, transmission_line):
+        return transmission_line in (candidate.transmission_line
+                                     for candidate in self.candidate_lines)
 
     @staticmethod
     def import_from_excel(excel_filepath):

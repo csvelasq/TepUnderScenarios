@@ -1,7 +1,7 @@
 import PowerSystem
 
 
-class PowerSystemState:
+class PowerSystemState(object):
     def __init__(self, system, name, duration):
         assert isinstance(system, PowerSystem.PowerSystem)
         self.system = system
@@ -21,7 +21,7 @@ class PowerSystemState:
         return next(node_state for node_state in self.node_states if node_state.node == node)
 
 
-class PowerSystemElementState:
+class PowerSystemElementState(object):
     def __init__(self, system_state, element):
         assert isinstance(system_state, PowerSystemState)
         self.system_state = system_state

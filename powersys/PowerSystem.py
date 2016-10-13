@@ -2,7 +2,7 @@ import os.path
 import pandas as pd
 
 
-class PowerSystem:
+class PowerSystem(object):
     def __init__(self, name):
         self.name = name
         self.nodes = []
@@ -14,6 +14,7 @@ class PowerSystem:
 
     @staticmethod
     def import_from_excel(excel_filepath):
+        # type: (str) -> PowerSystem
         name = os.path.splitext(os.path.basename(excel_filepath))[0]
         imported_system = PowerSystem(name)
         # import nodes
@@ -29,6 +30,7 @@ class PowerSystem:
         df_lines = pd.read_excel(excel_filepath, sheetname="TransmissionLines")
         for index, row in df_lines.iterrows():
             line = TransmissionLine(imported_system,
+                                    row['name'],
                                     imported_system.find_node(row['node_from']),
                                     imported_system.find_node(row['node_to']),
                                     row['susceptance'],
@@ -37,7 +39,7 @@ class PowerSystem:
         return imported_system
 
 
-class PowerSystemElement:
+class PowerSystemElement(object):
     def __init__(self, system):
         assert isinstance(system, PowerSystem)
         self.system = system
@@ -53,8 +55,9 @@ class Node(PowerSystemElement):
 
 
 class TransmissionLine(PowerSystemElement):
-    def __init__(self, system, node_from, node_to, susceptance, thermal_capacity):
+    def __init__(self, system, name, node_from, node_to, susceptance, thermal_capacity):
         PowerSystemElement.__init__(self, system)
+        self.name = name
         self.node_from = node_from
         self.node_to = node_to
         self.susceptance = susceptance

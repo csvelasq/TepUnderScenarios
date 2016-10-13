@@ -3,14 +3,13 @@ import PowerSystem as pws
 import PowerSystemState as pwstate
 
 
-class PowerSystemScenario:
+class PowerSystemScenario(object):
     def __init__(self, system, name):
-        assert isinstance(system, pws.PowerSystem)
+        # type: (powersys.PowerSystem.PowerSystem, unicode) -> None
         self.system = system
         self.name = name
         self.states = []
 
-    # excel_filepath=r"C:\Users\cvelasquez\Google Drive\2016 Paper TEP IEEEGM2017\07 Casos de estudio\Python\4bus_PowerSystem.xlsx"
     @staticmethod
     def import_scenarios_from_excel(excel_filepath):
         imported_system = pws.PowerSystem.import_from_excel(excel_filepath)
@@ -35,9 +34,11 @@ class PowerSystemScenario:
         for index, row in df_scenarios_data.iterrows():
             for scenario in imported_scenarios:
                 for state in scenario.states:
-                    node_state = next(
-                        x for x in state.node_states if x.node.name == row['Node'])  # type: pwstate.NodeState
+                    node_state = next(x for x in state.node_states
+                                      if x.node.name == row['Node'])  # type: pwstate.NodeState
                     node_state.load_state = row["Load-{0}-{1}".format(scenario.name, state.name)]
                     node_state.available_generating_capacity = row["Gx-{0}-{1}".format(scenario.name, state.name)]
                     node_state.generation_marginal_cost = row["MG-{0}-{1}".format(scenario.name, state.name)]
+                    # verify imported data
+                    assert node_state.available_generating_capacity <= node_state.node.installed_generating_capacity
         return imported_scenarios

@@ -1,13 +1,38 @@
 import gurobipy as grb
 import pandas as pd
+import collections
+import xlsxwriter
 import GrbOptModel as mygrb
 import Utils
 
 
+class OpfModelParameters(object):
+    def __init__(self, load_shedding_cost=2000,
+                 slack_bus=None,
+                 bus_angle_min=-grb.GRB.INFINITY, bus_angle_max=grb.GRB.INFINITY,
+                 bus_angle_max_difference=None,
+                 obj_func_multiplier=1e-6,  # US$ -> MMUS$
+                 save_detailed_solution=True,
+                 grb_opt_params=mygrb.GrbOptParameters()):
+        self.load_shedding_cost = load_shedding_cost
+        self.slack_bus = slack_bus
+        self.bus_angle_min = bus_angle_min
+        self.bus_angle_max = bus_angle_max
+        self.bus_angle_max_difference = bus_angle_max_difference
+        self.obj_func_multiplier = obj_func_multiplier
+        self.save_detailed_solution = save_detailed_solution
+        self.grb_opt_params = grb_opt_params
+
+
 class OpfModel(mygrb.GrbOptModel):
-    def __init__(self, state, opf_model_params, model=grb.Model('')):
+    """A Linear Optimal Power Flow model (DC power flow), always feasible LP,
+    for one particular state of the power system (a state which lasts for a given amount of hours)"""
+
+    def __init__(self, state,
+                 opf_model_params=OpfModelParameters(),
+                 model=grb.Model('')):
         # type: (powersys.PowerSystemState.PowerSystemState, OpfModelParameters, gurobipy.Model) -> None
-        mygrb.GrbOptModel.__init__(self, model)
+        mygrb.GrbOptModel.__init__(self, model, opf_model_params.grb_opt_params)
         self.state = state
         self.model = model
         self.opf_model_params = opf_model_params
@@ -21,6 +46,13 @@ class OpfModel(mygrb.GrbOptModel):
         # Model constraints
         self.nodal_power_balance = {}
         self.dc_power_flow = {}
+        # build gurobi model
+        self.create_grb_vars()
+        self.model.modelSense = grb.GRB.MINIMIZE
+        self.model.update()  # Update model to integrate new variables
+        self.create_grb_constraints()
+
+    def create_grb_vars(self):
         # Create nodal variables: pgen, load_shed and bus_angle
         for node_state in self.state.node_states:
             # variables are created even if a node has no load or generator
@@ -49,9 +81,8 @@ class OpfModel(mygrb.GrbOptModel):
             self.power_flow[line_state] = self.model.addVar(lb=-cap,
                                                             ub=+cap,
                                                             obj=0)
-        # Update model to integrate new variables
-        self.model.modelSense = grb.GRB.MINIMIZE
-        self.model.update()
+
+    def create_grb_constraints(self):
         # Create nodal_power_balance constraints
         for node_state in self.state.node_states:
             rhs_expr = grb.LinExpr(self.pgen[node_state])
@@ -80,7 +111,6 @@ class OpfModel(mygrb.GrbOptModel):
         # TODO review and improve this reporting
         obj_val = super(OpfModel, self).solve()
         if self.opf_model_params.save_detailed_solution:
-            self.model.write("opf.lp")
             return OpfModelResults(self, print_solution=True)
         else:
             return obj_val
@@ -89,61 +119,103 @@ class OpfModel(mygrb.GrbOptModel):
 class OpfModelResults(object):
     def __init__(self, opf_model, print_solution=False):
         # type: (OpfModel) -> None
+        assert opf_model.model.Status == grb.GRB.OPTIMAL
         self.model_state_name = opf_model.state.name
         # opf_model raw solutions
+        self.obj_val = opf_model.get_grb_objective_value()
         pgen_sol = opf_model.get_grb_vars_solution(opf_model.pgen)
         load_shed_sol = opf_model.get_grb_vars_solution(opf_model.load_shed)
         bus_angle_sol = opf_model.get_grb_vars_solution(opf_model.bus_angle)
         power_flow_sol = opf_model.get_grb_vars_solution(opf_model.power_flow)
-        # summary of solution
-        self.total_power_output = sum(pgen_sol.values())
-        self.total_energy_output = self.total_power_output * opf_model.state.duration
-        self.total_load_shed = sum(load_shed_sol.values())
-        self.total_energy_shed = self.total_load_shed * opf_model.state.duration
-        self.hourly_gen_costs = sum(pgen_sol[node_state] * node_state.generation_marginal_cost
-                                    for node_state in opf_model.state.node_states)
-        self.total_gen_costs = self.hourly_gen_costs * opf_model.state.duration
-        self.hourly_ls_costs = self.total_load_shed * opf_model.opf_model_params.load_shedding_cost
-        self.total_ls_costs = self.hourly_gen_costs * opf_model.state.duration
-        self.hourly_op_costs = self.hourly_gen_costs + self.hourly_ls_costs
-        self.total_op_costs = self.total_gen_costs + self.total_ls_costs
+        spot_prices_sol = opf_model.get_grb_constraints_shadow_prices(opf_model.nodal_power_balance)
+        spot_prices_sol_list = Utils.get_values_from_dict(spot_prices_sol)
+        # summary of solution [MW, GWh, US$/h, MUS$, US$/MWh]
+        self.summary_sol = collections.OrderedDict()
+        self.summary_sol['Objective Function Value'] = sum(pgen_sol.values())
+        self.summary_sol['Total Power Output [MW]'] = sum(pgen_sol.values())
+        self.summary_sol['Total Energy Output [GWh]'] = self.summary_sol[
+                                                            'Total Power Output [MW]'] * opf_model.state.duration / 1e3
+        self.summary_sol['Total Load Shed [MW]'] = sum(load_shed_sol.values())
+        self.summary_sol['Total Energy Shed [GWh]'] = self.summary_sol[
+                                                          'Total Load Shed [MW]'] * opf_model.state.duration / 1e3
+        self.summary_sol['Hourly Generation Costs [US$/h]'] = sum(
+            pgen_sol[node_state] * node_state.generation_marginal_cost
+            for node_state in opf_model.state.node_states)
+        self.summary_sol['Total Generation Costs [MMUS$]'] = self.summary_sol[
+                                                                 'Hourly Generation Costs [US$/h]'] * opf_model.state.duration / 1e6
+        self.summary_sol['Hourly Load Shedding Costs [US$/h]'] = self.summary_sol[
+                                                                     'Total Load Shed [MW]'] * opf_model.opf_model_params.load_shedding_cost
+        self.summary_sol['Total Load Shedding Costs [MMUS$]'] = self.summary_sol[
+                                                                    'Hourly Load Shedding Costs [US$/h]'] * opf_model.state.duration / 1e6
+        self.summary_sol['Hourly Operation Costs [US$/h]'] = self.summary_sol['Hourly Generation Costs [US$/h]'] + \
+                                                             self.summary_sol['Hourly Load Shedding Costs [US$/h]']
+        self.summary_sol['Total Operation Costs [MMUS$]'] = self.summary_sol[
+                                                                'Hourly Operation Costs [US$/h]'] * opf_model.state.duration / 1e6
+        self.summary_sol['Average Spot Price [US$/MWh]'] = float(sum(spot_prices_sol_list)) / len(spot_prices_sol_list)
+        self.summary_sol['Maximum Spot Price [US$/MWh]'] = max(spot_prices_sol_list)
+        self.summary_sol['Minimum Spot Price [US$/MWh]'] = min(spot_prices_sol_list)
+        self.df_summary = Utils.dataframe_from_dict(self.summary_sol)
         # nodal hourly solution (MW and US$/h)
         self.df_nodal_soln = pd.DataFrame(columns=['Node',
                                                    'Hourly Operation Cost [US$/h]',
                                                    'Hourly Generation Cost [US$/h]',
                                                    'Hourly Load Shedding Cost [US$/h]',
+                                                   'Spot Price [US$/MWh]',
+                                                   'Marginal Generation Cost [US$/MWh]',
                                                    'Power Generated [MW]',
+                                                   'Available Generating Capacity [MW]',
+                                                   'Generation Utilization [%]',
                                                    'Load Shed [MW]',
+                                                   'Load [MW]',
                                                    'Consumption [MW]',
                                                    'Bus Angle [rad]'])
         n = 0
-        obj_mult = opf_model.opf_model_params.obj_func_multiplier
         for node_state in opf_model.state.node_states:
             # costs are converted back from MMUS$ to US$
-            pcost = pgen_sol[node_state] * node_state.generation_marginal_cost / obj_mult
-            lscost = load_shed_sol[node_state] * opf_model.opf_model_params.load_shedding_cost / obj_mult
+            pcost = pgen_sol[node_state] * node_state.generation_marginal_cost
+            lscost = load_shed_sol[node_state] * opf_model.opf_model_params.load_shedding_cost
             row = [node_state.node.name,
                    pcost + lscost,
                    pcost,
                    lscost,
+                   spot_prices_sol[node_state],
+                   node_state.generation_marginal_cost,
                    pgen_sol[node_state],
+                   node_state.available_generating_capacity,
+                   Utils.get_utilization(pgen_sol[node_state], node_state.available_generating_capacity),
                    load_shed_sol[node_state],
+                   node_state.load_state,
                    node_state.load_state - load_shed_sol[node_state],
                    bus_angle_sol[node_state]]
             self.df_nodal_soln.loc[n] = row
             n += 1
-        # transmission lines power flows
+        # transmission lines power flows in solution [MW]
         self.df_lines_soln = pd.DataFrame(columns=['Transmission Line',
+                                                   'Is active?',
                                                    'Power Flow [MW]',
+                                                   'Thermal Capacity [MW]',
+                                                   'Utilization [%]',
+                                                   'Spot price from [rad]',
+                                                   'Spot price to [rad]',
+                                                   'Spot price from-to [rad]',
                                                    'Angle from [rad]',
                                                    'Angle to [rad]',
+                                                   'Angle from-to [rad]',
                                                    'Susceptance [pu]'])
         n = 0
         for line_state in opf_model.state.transmission_lines_states:
             row = [line_state.transmission_line.name,
+                   line_state.isavailable,
                    power_flow_sol[line_state],
+                   line_state.transmission_line.thermal_capacity,
+                   Utils.get_utilization(abs(power_flow_sol[line_state]),
+                                         line_state.transmission_line.thermal_capacity),
+                   spot_prices_sol[line_state.node_from_state],
+                   spot_prices_sol[line_state.node_to_state],
+                   spot_prices_sol[line_state.node_from_state] - spot_prices_sol[line_state.node_to_state],
                    bus_angle_sol[line_state.node_from_state],
                    bus_angle_sol[line_state.node_to_state],
+                   bus_angle_sol[line_state.node_from_state] - bus_angle_sol[line_state.node_to_state],
                    line_state.transmission_line.susceptance]
             self.df_lines_soln.loc[n] = row
             n += 1
@@ -164,25 +236,27 @@ class OpfModelResults(object):
         print self.df_lines_soln
         print '*' * 50
 
+    def to_excel(self, filename):
+        writer = pd.ExcelWriter(filename, engine='xlsxwriter')
+        self.to_excel_sheets(writer)
+        # Close the Pandas Excel writer and output the Excel file.
+        writer.save()
 
-class OpfModelParameters(object):
-    def __init__(self, load_shedding_cost=2000,
-                 slack_bus=None,
-                 bus_angle_min=-grb.GRB.INFINITY, bus_angle_max=grb.GRB.INFINITY,
-                 bus_angle_max_difference=None,
-                 obj_func_multiplier=1e-6,  # US$ -> MMUS$
-                 save_detailed_solution=False):
-        self.load_shedding_cost = load_shedding_cost
-        self.slack_bus = slack_bus
-        self.bus_angle_min = bus_angle_min
-        self.bus_angle_max = bus_angle_max
-        self.bus_angle_max_difference = bus_angle_max_difference
-        self.obj_func_multiplier = obj_func_multiplier
-        self.save_detailed_solution = save_detailed_solution
+    def to_excel_sheets(self, writer):
+        sheetname_summary = 'Solution summary'
+        Utils.df_to_excel_sheet_autoformat(self.df_summary, writer, sheetname_summary)
+        sheetname_nodal = 'Nodal solution'
+        Utils.df_to_excel_sheet_autoformat(self.df_nodal_soln, writer, sheetname_nodal)
+        sheetname_lines = 'Line solution'
+        Utils.df_to_excel_sheet_autoformat(self.df_lines_soln, writer, sheetname_lines)
 
 
 class ScenarioOpfModel(mygrb.GrbOptModel):
-    def __init__(self, scenario, opf_model_params,
+    """An OPF model for a particular scenario of a power system.
+    A scenario is understood as a static collection of power system states
+    (for example, hourly states for a full year under some set of assumptions)"""
+
+    def __init__(self, scenario, opf_model_params=OpfModelParameters(),
                  model=grb.Model('')):
         # type: (powersys.PowerSystemScenario.PowerSystemScenario, OpfModelParameters, gurobipy.Model) -> None
         mygrb.GrbOptModel.__init__(self, model)
@@ -196,9 +270,22 @@ class ScenarioOpfModel(mygrb.GrbOptModel):
             self.opf_models[state] = opf_model
             # TODO build and encapsulate opf static states model results in another class
 
+    def solve(self):
+        obj_val = super(ScenarioOpfModel, self).solve()
+        if self.opf_model_params.save_detailed_solution:
+            for state in self.scenario.states:
+                self.opf_models_results[state] = OpfModelResults(self.opf_models[state], print_solution=False)
+            return self.opf_models_results
+        else:
+            return obj_val
+
 
 class ScenariosOpfModel(object):
-    def __init__(self, scenarios, opf_model_params):
+    """Simulation of optimal power system operation under multiple independent scenarios.
+    Optimal operation is simulated under each scenario independent of the operation in other scenarios."""
+
+    def __init__(self, scenarios,
+                 opf_model_params=OpfModelParameters()):
         # type: (list[powersys.PowerSystemScenario.PowerSystemScenario], OpfModelParameters) -> None
         self.scenarios = scenarios
         self.opf_model_params = opf_model_params
@@ -206,13 +293,12 @@ class ScenariosOpfModel(object):
         self.scenarios_models = dict()
         for scenario in self.scenarios:
             scenario_model = ScenarioOpfModel(scenario, self.opf_model_params, model=grb.Model(''))
-            scenario_model.solve()
             self.scenarios_models[scenario] = scenario_model
             # TODO build and encapsulate opf static states model results in another class
 
     def solve(self):
         operation_costs_scenarios = dict()
         for scenario in self.scenarios:
-            operation_costs_scenario = self.scenarios_models[scenario].solve()
-            operation_costs_scenarios[scenario] = operation_costs_scenario
+            scenario_results = self.scenarios_models[scenario].solve()
+            operation_costs_scenarios[scenario] = self.scenarios_models[scenario].get_grb_objective_value()
         return operation_costs_scenarios

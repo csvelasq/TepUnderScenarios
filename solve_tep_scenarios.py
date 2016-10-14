@@ -1,6 +1,7 @@
 import logging
 import os
 import tepmodel as tep
+import Utils
 
 
 # logger = logging.getLogger(__name__)
@@ -63,10 +64,27 @@ class TepSolverApp(object):
             self.plot_exact_pareto_front()
         return self.tep_pareto_brute_solver_summary
 
-    def save_exact_pareto_front_to_excel(self):
+    def save_exact_pareto_front_to_excel(self, open_upon_completion=True):
         self.pareto_excel_filename = self.from_relative_to_abs_path_instance(self.instance_name + "_fullpareto.xlsx")
-        self.tep_pareto_brute_solver_summary.to_excel(self.pareto_excel_filename)
-        print "Saved Pareto-Front results to file '{0}'".format(self.pareto_excel_filename)
+        # saved_successfully = False
+        # while not saved_successfully:
+        #     try:
+        #         self.tep_pareto_brute_solver_summary.to_excel(self.pareto_excel_filename)
+        #     except IOError:
+        #         raw_input(
+        #             "Could not open excel file '%s' for writing, press enter once the file is free" % (
+        #                 self.pareto_excel_filename,))
+        #     else:
+        #         saved_successfully = True
+        #         print "Saved Pareto-Front results to file '{0}'".format(self.pareto_excel_filename)
+        # if open_upon_completion:
+        #     os.system('start excel.exe "%s"' % (self.pareto_excel_filename,))
+        saved_successfully = Utils.try_save_file(self.pareto_excel_filename,
+                                                 self.tep_pareto_brute_solver_summary.to_excel)
+        if not saved_successfully:
+            print "Pareto-front results were not written to file '{0}'".format(self.pareto_excel_filename)
+        elif open_upon_completion:
+            os.system('start excel.exe "%s"' % (self.pareto_excel_filename,))
 
     def plot_exact_pareto_front(self):
         self.pareto_plot_filename = self.from_relative_to_abs_path_instance(self.instance_name + "_fullpareto.html")
@@ -76,6 +94,12 @@ class TepSolverApp(object):
                 scen_num)
         else:
             self.tep_pareto_brute_solver.plot_alternatives(self.pareto_plot_filename)
+
+    def inspect_transmission_plan(self, plan_id):
+        max_id = (1 << len(self.tep_model.tep_system.candidate_lines))
+        if plan_id >= max_id:
+            print "Impossible to build plan with ID={0} since the maximum possible ID is {1}".format(plan_id, max_id)
+        plan = tep.StaticTePlan.from_id(self.tep_model, plan_id)
 
 
 if __name__ == '__main__':
@@ -89,12 +113,5 @@ if __name__ == '__main__':
     print 'Building pareto front by brute force, saving results to excel and plotting (if possible)...'
     my_tep_app.build_pareto_front_by_brute_force(save_to_excel=True, plot_front=True)
     print 'Ok'
-    # print pareto_summary.df_alternatives
-    # print 'Dominated alternatives:'
-    # for alt in tep_pareto_solver.get_dominated_alternatives():
-    #     print "ID={0}; Built lines='{1}'; Operation costs={2}; Investment cost={3}; Total costs={4}" \
-    #         .format(alt.get_plan_id(), map(str, alt.candidate_lines_built),
-    #                 map(int, alt.operation_costs.values()), alt.get_total_investment_cost(),
-    #                 map(int, alt.total_costs.values()))
 
     print 'Done, quitting now'

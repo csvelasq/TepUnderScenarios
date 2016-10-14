@@ -4,7 +4,7 @@ import Utils
 import plotly
 from plotly.graph_objs import Scatter, Layout
 import pandas as pd
-from jinja2 import Environment, PackageLoader
+import xlsxwriter
 
 
 class TepScenariosModel(object):
@@ -44,7 +44,7 @@ class TepScenariosModel(object):
             total_costs[scenario] = op_multiplier * operation_costs[scenario] + investment_cost
         return [total_costs, operation_costs]
 
-    def get_possible_expansion_plans(self):
+    def get_numberof_possible_expansion_plans(self):
         return 1 << len(self.tep_system.candidate_lines)
 
 
@@ -95,6 +95,11 @@ class StaticTePlan(object):
         return True
 
 
+class StaticTePlanDetails(object):
+    def __init__(self, plan):
+        self.plan = plan
+
+
 class ScenariosTepParetoFrontByBruteForce(object):
     def __init__(self, tep_model):
         # type: (TepScenariosModel) -> None
@@ -102,7 +107,7 @@ class ScenariosTepParetoFrontByBruteForce(object):
         self.alternatives = []  # type: list[StaticTePlan]
         self.efficient_alternatives = []  # type: list[StaticTePlan]
         # enumerate and evaluate all possible alternatives
-        for plan_id in range(self.tep_model.get_possible_expansion_plans()):
+        for plan_id in range(self.tep_model.get_numberof_possible_expansion_plans()):
             alternative = StaticTePlan.from_id(self.tep_model, plan_id)
             self.alternatives.append(alternative)
         # build pareto front
@@ -204,12 +209,25 @@ class ScenariosTepParetoFrontByBruteForceSummary(object):
             self.df_alternatives.loc[n] = row
             n += 1
 
-    def to_html(self, html_filename):
-        env = Environment(loader=PackageLoader('tepmodel', 'templates'))
-        template = env.get_template('pareto_brute_force_template.html')
-        output_from_parsed_template = template.render(data=self.df_alternatives.to_html())
-        with open(html_filename, "wb") as fh:
-            fh.write(output_from_parsed_template)
+    def to_excel(self, excel_filename, sheetname='Sheet1'):
+        # self.df_alternatives.to_excel(excel_filename)
 
-    def to_excel(self, excel_filename):
-        self.df_alternatives.to_excel(excel_filename)
+        # from: http://xlsxwriter.readthedocs.io/example_pandas_column_formats.html
+        # Create a Pandas Excel writer using XlsxWriter as the engine.
+        writer = pd.ExcelWriter(excel_filename, engine='xlsxwriter')
+        self.to_excel_sheet(writer, sheetname=sheetname)
+        # Close the Pandas Excel writer and output the Excel file.
+        writer.save()
+
+    def to_excel_sheet(self, writer, sheetname='Sheet1'):
+        # Convert the dataframe to an XlsxWriter Excel object.
+        self.df_alternatives.to_excel(writer, sheet_name=sheetname)
+        # Get the xlsxwriter workbook and worksheet objects.
+        workbook = writer.book
+        worksheet = writer.sheets[sheetname]
+        # Add some cell formats.
+        format_costs = workbook.add_format({'num_format': '$#,##0.00'})
+        format_costs.set_text_wrap()
+        # Set the column width and format.
+        worksheet.set_column('F:J', 18, format_costs)
+        worksheet.set_column('C:E', 18, None)

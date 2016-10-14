@@ -113,7 +113,7 @@ class ScenariosTepParetoFrontByBruteForce(object):
     def get_dominated_alternatives(self):
         return (alt for alt in self.alternatives if alt not in self.efficient_alternatives)
 
-    def plot_alternatives(self):
+    def plot_alternatives(self, filename):
         def alternatives_to_plot_list(s1, s2, alternatives):
             x = list(alternative.total_costs[s1]
                      for alternative in alternatives)
@@ -171,7 +171,8 @@ class ScenariosTepParetoFrontByBruteForce(object):
         plotly.offline.plot({
             "data": [trace_efficient, trace_dominated],
             "layout": plot_layout
-        })
+        },
+            filename=filename)
 
 
 class ScenariosTepParetoFrontByBruteForceSummary(object):
@@ -182,6 +183,7 @@ class ScenariosTepParetoFrontByBruteForceSummary(object):
         # dataframe with the summary solution for each alternative
         df_column_names = ['Plan ID',
                            'Kind',
+                           'Number of Built Lines',
                            'Built Lines',
                            'Investment Cost [MMUS$]']
         for scenario in pareto_brute.tep_model.tep_system.scenarios:
@@ -193,6 +195,7 @@ class ScenariosTepParetoFrontByBruteForceSummary(object):
             kind = 'Efficient' if alternative in pareto_brute.efficient_alternatives else 'Dominated'
             row = [alternative.get_plan_id(),
                    kind,
+                   len(alternative.candidate_lines_built),
                    map(str, alternative.candidate_lines_built),
                    alternative.get_total_investment_cost()]
             for scenario in pareto_brute.tep_model.tep_system.scenarios:
@@ -207,3 +210,6 @@ class ScenariosTepParetoFrontByBruteForceSummary(object):
         output_from_parsed_template = template.render(data=self.df_alternatives.to_html())
         with open(html_filename, "wb") as fh:
             fh.write(output_from_parsed_template)
+
+    def to_excel(self, excel_filename):
+        self.df_alternatives.to_excel(excel_filename)

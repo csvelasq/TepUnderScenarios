@@ -7,9 +7,18 @@ import pandas as pd
 import xlsxwriter
 
 
+class TepScenariosModelParameters(object):
+    def __init__(self, opf_model_params=opf.OpfModelParameters(),
+                 investment_costs_multiplier=1, operation_costs_multiplier=1):
+        # type: (double, double, opf.OpfModelParameters) -> None
+        self.investment_costs_multiplier = investment_costs_multiplier
+        self.operation_costs_multiplier = operation_costs_multiplier
+        self.opf_model_params = opf_model_params
+
+
 class TepScenariosModel(object):
     def __init__(self, tep_system,
-                 tep_scenarios_model_parameters):
+                 tep_scenarios_model_parameters=TepScenariosModelParameters()):
         # type: (powersys.PowerSystemPlanning.PowerSystemTransmissionPlanning, TepScenariosModelParameters, gurobipy.Model) -> None
         self.tep_system = tep_system
         self.tep_scenarios_model_parameters = tep_scenarios_model_parameters
@@ -26,8 +35,11 @@ class TepScenariosModel(object):
         imported_tep_model = TepScenariosModel(imported_tep_system, tep_scenarios_model_parameters)
         return imported_tep_model
 
-    def evaluate_plan(self, plan):
-        # type: (StaticTePlan) -> dict[powersys.PowerSystemScenario.PowerSystemScenario, float]
+    def evaluate_plan(self, plan, tep_scenarios_model_parameters=None):
+        # type: (StaticTePlan) -> [dict[powersys.PowerSystemScenario.PowerSystemScenario, float], dict[powersys.PowerSystemScenario.PowerSystemScenario, float]]
+        params = tep_scenarios_model_parameters
+        if params is None:
+            params = self.tep_scenarios_model_parameters
         total_costs = dict()
         investment_cost = plan.get_total_investment_cost()
         # modify all scenarios so as to build lines in the provided plan
@@ -35,34 +47,30 @@ class TepScenariosModel(object):
         self.tep_system.commit_build_lines(plan.candidate_lines_built)
         # simulate operation under each scenario
         scenario_simulation_model = opf.ScenariosOpfModel(self.tep_system.scenarios,
-                                                          self.tep_scenarios_model_parameters.opf_model_params)
+                                                          params.opf_model_params)
         operation_costs = scenario_simulation_model.solve()
         # total costs = operation + investment costs (with multipliers)
-        investment_cost *= self.tep_scenarios_model_parameters.investment_costs_multiplier
-        op_multiplier = self.tep_scenarios_model_parameters.operation_costs_multiplier
+        investment_cost *= params.investment_costs_multiplier
+        op_multiplier = params.operation_costs_multiplier
         for scenario in self.tep_system.scenarios:
             total_costs[scenario] = op_multiplier * operation_costs[scenario] + investment_cost
-        return [total_costs, operation_costs]
+        return [scenario_simulation_model, total_costs, operation_costs]
 
     def get_numberof_possible_expansion_plans(self):
         return 1 << len(self.tep_system.candidate_lines)
 
 
-class TepScenariosModelParameters(object):
-    def __init__(self, opf_model_params=opf.OpfModelParameters(),
-                 investment_costs_multiplier=1, operation_costs_multiplier=1):
-        # type: (double, double, opf.OpfModelParameters) -> None
-        self.investment_costs_multiplier = investment_costs_multiplier
-        self.operation_costs_multiplier = operation_costs_multiplier
-        self.opf_model_params = opf_model_params
-
-
 class StaticTePlan(object):
-    def __init__(self, tep_model, candidate_lines_built=[]):
+    """A static transmission expansion plan (which lines to build, all simultaneously)"""
+
+    def __init__(self, tep_model, candidate_lines_built=[],
+                 tep_scenarios_model_parameters=None):
         # type: (TepScenariosModel) -> None
         self.tep_model = tep_model
         self.candidate_lines_built = candidate_lines_built
-        [self.total_costs, self.operation_costs] = self.tep_model.evaluate_plan(self)
+        self.tep_scenarios_model_parameters = tep_scenarios_model_parameters
+        [self.scenario_simulation_model, self.total_costs, self.operation_costs] = self.tep_model.evaluate_plan(self,
+                                                                                                                self.tep_scenarios_model_parameters)
 
     @staticmethod
     def from_id(tep_model, plan_id):
@@ -96,8 +104,21 @@ class StaticTePlan(object):
 
 
 class StaticTePlanDetails(object):
+    """Details for a given static transmission expansion plan, mainly performance assessment under scenarios"""
+
     def __init__(self, plan):
-        self.plan = plan
+        self.plan = plan  # type: StaticTePlan
+        # get detailed solution
+        self.scenarios_results = opf.ScenariosOpfModelResults(self.plan.scenario_simulation_model)
+
+    def to_excel(self, filename):
+        writer = pd.ExcelWriter(filename, engine='xlsxwriter')
+        self.to_excel_sheets(writer)
+        # Close the Pandas Excel writer and output the Excel file.
+        writer.save()
+
+    def to_excel_sheets(self, writer):
+        self.scenarios_results.to_excel_sheets(writer)
 
 
 class ScenariosTepParetoFrontByBruteForce(object):

@@ -12,7 +12,6 @@ class OpfModelParameters(object):
                  bus_angle_min=-grb.GRB.INFINITY, bus_angle_max=grb.GRB.INFINITY,
                  bus_angle_max_difference=None,
                  obj_func_multiplier=1e-6,  # US$ -> MMUS$
-                 save_detailed_solution=True,
                  grb_opt_params=mygrb.GrbOptParameters()):
         self.load_shedding_cost = load_shedding_cost
         self.slack_bus = slack_bus
@@ -20,7 +19,6 @@ class OpfModelParameters(object):
         self.bus_angle_max = bus_angle_max
         self.bus_angle_max_difference = bus_angle_max_difference
         self.obj_func_multiplier = obj_func_multiplier
-        self.save_detailed_solution = save_detailed_solution
         self.grb_opt_params = grb_opt_params
 
 
@@ -107,20 +105,15 @@ class OpfModel(mygrb.GrbOptModel):
                                      susceptance * bus_angle_from - susceptance * bus_angle_to)
             # TODO Create bus angle difference constraint, based on self.bus_angle_max_difference
 
-    def solve(self):
-        # TODO review and improve this reporting
-        obj_val = super(OpfModel, self).solve()
-        if self.opf_model_params.save_detailed_solution:
-            return OpfModelResults(self, print_solution=True)
-        else:
-            return obj_val
-
 
 class OpfModelResults(object):
+    """Detailed results for a solved OPF model"""
+
     def __init__(self, opf_model, print_solution=False):
         # type: (OpfModel) -> None
-        assert opf_model.model.Status == grb.GRB.OPTIMAL
+        assert opf_model.is_solved_to_optimality()
         self.model_state_name = opf_model.state.name
+        self.state = opf_model.state
         # opf_model raw solutions
         self.obj_val = opf_model.get_grb_objective_value()
         pgen_sol = opf_model.get_grb_vars_solution(opf_model.pgen)
@@ -243,7 +236,7 @@ class OpfModelResults(object):
         writer.save()
 
     def to_excel_sheets(self, writer):
-        sheetname_summary = 'Solution summary'
+        sheetname_summary = 'State OPF Solution summary'
         Utils.df_to_excel_sheet_autoformat(self.df_summary, writer, sheetname_summary)
         sheetname_nodal = 'Nodal solution'
         Utils.df_to_excel_sheet_autoformat(self.df_nodal_soln, writer, sheetname_nodal)
@@ -268,16 +261,54 @@ class ScenarioOpfModel(mygrb.GrbOptModel):
         for state in self.scenario.states:
             opf_model = OpfModel(state, self.opf_model_params, self.model)
             self.opf_models[state] = opf_model
-            # TODO build and encapsulate opf static states model results in another class
 
-    def solve(self):
-        obj_val = super(ScenarioOpfModel, self).solve()
-        if self.opf_model_params.save_detailed_solution:
-            for state in self.scenario.states:
-                self.opf_models_results[state] = OpfModelResults(self.opf_models[state], print_solution=False)
-            return self.opf_models_results
-        else:
-            return obj_val
+
+class ScenarioOpfModelResults(object):
+    """Detailed results for a solved Scenario OPF model"""
+
+    def __init__(self, scenario_model):
+        # type: (ScenarioOpfModel) -> None
+        assert scenario_model.is_solved_to_optimality()
+        self.scenario = scenario_model.scenario
+        self.model_scenario_name = scenario_model.scenario.name
+        # build detailed solutions for each opf_model
+        self.opf_models_results = dict()
+        for state in self.scenario.states:
+            self.opf_models_results[state] = OpfModelResults(scenario_model.opf_models[state])
+        # build summary of solution for this scenario [MW, GWh, US$/h, MUS$, US$/MWh]
+        opf_results = self.opf_models_results.values()
+        self.obj_val = scenario_model.get_grb_objective_value()
+        self.summary_sol = collections.OrderedDict()
+        self.summary_sol['Objective Function Value'] = self.obj_val
+        self.summary_sol['Total Energy Output [GWh]'] = sum(r.summary_sol['Total Energy Output [GWh]']
+                                                            for r in opf_results)
+        self.summary_sol['Total Energy Shed [GWh]'] = sum(r.summary_sol['Total Energy Shed [GWh]']
+                                                          for r in opf_results)
+        self.summary_sol['Total Generation Costs [MMUS$]'] = sum(r.summary_sol['Total Generation Costs [MMUS$]']
+                                                                 for r in opf_results)
+        self.summary_sol['Total Load Shedding Costs [MMUS$]'] = sum(r.summary_sol['Total Load Shedding Costs [MMUS$]']
+                                                                    for r in opf_results)
+        self.summary_sol['Total Operation Costs [MMUS$]'] = sum(r.summary_sol['Total Operation Costs [MMUS$]']
+                                                                for r in opf_results)
+        self.summary_sol['Average Spot Price [US$/MWh]'] = sum(
+            r.summary_sol['Average Spot Price [US$/MWh]'] * r.state.duration
+            for r in opf_results) / sum(r.state.duration for r in opf_results)
+        self.summary_sol['Peak Spot Price [US$/MWh]'] = max(r.summary_sol['Maximum Spot Price [US$/MWh]']
+                                                            for r in opf_results)
+        self.summary_sol['Minimum Spot Price [US$/MWh]'] = min(r.summary_sol['Minimum Spot Price [US$/MWh]']
+                                                               for r in opf_results)
+        self.df_summary = Utils.dataframe_from_dict(self.summary_sol, column_values_name=self.model_scenario_name)
+        # TODO detailed nodal and line solutions for this scenario (collection of states)
+
+    def to_excel(self, filename):
+        writer = pd.ExcelWriter(filename, engine='xlsxwriter')
+        self.to_excel_sheets(writer)
+        # Close the Pandas Excel writer and output the Excel file.
+        writer.save()
+
+    def to_excel_sheets(self, writer):
+        sheetname_summary = 'Scenario Solution summary'
+        Utils.df_to_excel_sheet_autoformat(self.df_summary, writer, sheetname_summary)
 
 
 class ScenariosOpfModel(object):
@@ -290,15 +321,43 @@ class ScenariosOpfModel(object):
         self.scenarios = scenarios
         self.opf_model_params = opf_model_params
         # Build independent simulation models for each scenario
-        self.scenarios_models = dict()
+        self.model_each_scenario = dict()
         for scenario in self.scenarios:
-            scenario_model = ScenarioOpfModel(scenario, self.opf_model_params, model=grb.Model(''))
-            self.scenarios_models[scenario] = scenario_model
-            # TODO build and encapsulate opf static states model results in another class
+            self.model_each_scenario[scenario] = ScenarioOpfModel(scenario, self.opf_model_params, model=grb.Model(''))
+        self.operation_costs_scenarios = dict()
 
     def solve(self):
-        operation_costs_scenarios = dict()
+        """Simulates the optimal operation for each scenario
+
+        :return: A dictionary with the minimum operation cost under each scenario
+        """
         for scenario in self.scenarios:
-            scenario_results = self.scenarios_models[scenario].solve()
-            operation_costs_scenarios[scenario] = self.scenarios_models[scenario].get_grb_objective_value()
-        return operation_costs_scenarios
+            self.operation_costs_scenarios[scenario] = self.model_each_scenario[scenario].solve()
+        return self.operation_costs_scenarios
+
+
+class ScenariosOpfModelResults(object):
+    """Results for the simulation of optimal power system operation under multiple independent scenarios"""
+
+    def __init__(self, scenarios_model):
+        # type: (ScenariosOpfModel) -> None
+        assert len(scenarios_model.operation_costs_scenarios) == len(scenarios_model.scenarios)
+        self.scenarios = scenarios_model.scenarios
+        # build detailed solutions for each scenario model and build a summary table of scenarios
+        self.scenarios_models_results = collections.OrderedDict()
+        self.scenarios_models_summaries = collections.OrderedDict()
+        for scenario in self.scenarios:
+            self.scenarios_models_results[scenario] = ScenarioOpfModelResults(
+                scenarios_model.model_each_scenario[scenario])
+            self.scenarios_models_summaries[scenario.name] = self.scenarios_models_results[scenario].summary_sol
+        self.df_summary = pd.DataFrame(self.scenarios_models_summaries).transpose()
+
+    def to_excel(self, filename):
+        writer = pd.ExcelWriter(filename, engine='xlsxwriter')
+        self.to_excel_sheets(writer)
+        # Close the Pandas Excel writer and output the Excel file.
+        writer.save()
+
+    def to_excel_sheets(self, writer):
+        sheetname_summary = 'Scenarios Solution summary'
+        Utils.df_to_excel_sheet_autoformat(self.df_summary, writer, sheetname_summary)

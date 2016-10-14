@@ -19,8 +19,8 @@ def dataframe_to_html(df, html_file):
     text_file.close()
 
 
-def dataframe_from_dict(d):
-    return pd.DataFrame(d.items(), columns=['NAME', 'VALUE'])
+def dataframe_from_dict(d, column_values_name='VALUE'):
+    return pd.DataFrame(d.items(), columns=['NAME', column_values_name])
 
 
 def get_scalar_attributes(obj_instance):

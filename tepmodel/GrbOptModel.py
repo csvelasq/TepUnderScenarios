@@ -32,7 +32,10 @@ class GrbOptModel(object):
         if self.params.dump_model:
             self.model.write(self.params.dump_model_filepath)
         self.model.optimize()
-        return self.get_grb_objective_value
+        return self.get_grb_objective_value()
+
+    def is_solved_to_optimality(self):
+        return self.model.Status == grb.GRB.OPTIMAL
 
     def get_grb_objective_value(self):
         return self.model.ObjVal

@@ -43,6 +43,13 @@ class TepSolverApp(object):
         return os.path.isdir(workspace_dirpath) and \
                os.path.exists(os.path.join(workspace_dirpath, case_name + ".xlsx"))
 
+    @staticmethod
+    def open_workspace(workspace_path):
+        wp = workspace_path
+        while not TepSolverApp.is_valid_workspace(wp):
+            wp = raw_input('Workspace {0} not valid, please insert new workspace: '.format(wp))
+        return TepSolverApp(wp)
+
     def open_new_tep_model_instance(self):
         return tep.TepScenariosModel.import_from_excel(self.from_relative_to_abs_path(self.tep_case_filename))
 
@@ -66,19 +73,6 @@ class TepSolverApp(object):
 
     def save_exact_pareto_front_to_excel(self, open_upon_completion=True):
         self.pareto_excel_filename = self.from_relative_to_abs_path_instance(self.instance_name + "_fullpareto.xlsx")
-        # saved_successfully = False
-        # while not saved_successfully:
-        #     try:
-        #         self.tep_pareto_brute_solver_summary.to_excel(self.pareto_excel_filename)
-        #     except IOError:
-        #         raw_input(
-        #             "Could not open excel file '%s' for writing, press enter once the file is free" % (
-        #                 self.pareto_excel_filename,))
-        #     else:
-        #         saved_successfully = True
-        #         print "Saved Pareto-Front results to file '{0}'".format(self.pareto_excel_filename)
-        # if open_upon_completion:
-        #     os.system('start excel.exe "%s"' % (self.pareto_excel_filename,))
         saved_successfully = Utils.try_save_file(self.pareto_excel_filename,
                                                  self.tep_pareto_brute_solver_summary.to_excel)
         if not saved_successfully:
@@ -96,22 +90,41 @@ class TepSolverApp(object):
             self.tep_pareto_brute_solver.plot_alternatives(self.pareto_plot_filename)
 
     def inspect_transmission_plan(self, plan_id):
+        """
+
+        :param plan_id: The ID of the plan to create, assess and inspect
+        :return: An instance of StaticTePlanDetails, which contains the detailed assessment of the plan and the plan itself
+        """
         max_id = (1 << len(self.tep_model.tep_system.candidate_lines))
         if plan_id >= max_id:
             print "Impossible to build plan with ID={0} since the maximum possible ID is {1}".format(plan_id, max_id)
         plan = tep.StaticTePlan.from_id(self.tep_model, plan_id)
+        plan_details = tep.StaticTePlanDetails(plan)
+        plan_details_excel_path = self.from_relative_to_abs_path_instance('Plan{0}_Details.xlsx'.format(plan_id))
+        saved_successfully = Utils.try_save_file(plan_details_excel_path, plan_details.to_excel)
+        if not saved_successfully:
+            print "Detailed results for plan '{0}' were not written to file '{1}'".format(plan_id,
+                                                                                          plan_details_excel_path)
+        else:
+            os.system('start excel.exe "%s"' % (plan_details_excel_path,))
+        return plan_details
 
 
 if __name__ == '__main__':
     # set this to a default; if it doesn't exist, I will ask for another directory
-    workspace_path = r"C:\Users\cvelasquez\Google Drive\2016 Paper TEP IEEEGM2017\07 Casos de estudio\Python\Garver6"
+    default_workspace_path = r"C:\Users\cvelasquez\Google Drive\2016 Paper TEP IEEEGM2017\07 Casos de estudio\Python\Garver6"
+    my_tep_app = TepSolverApp.open_workspace(default_workspace_path)  # type: TepSolverApp
 
-    while not TepSolverApp.is_valid_workspace(workspace_path):
-        workspace_path = raw_input('Workspace {0} not valid, please insert new workspace: '.format(workspace_path))
-    my_tep_app = TepSolverApp(workspace_path)
+    build_pareto = raw_input('Build pareto front (y/n): [y]')
+    if build_pareto == "" or build_pareto == "y":
+        print 'Building pareto front by brute force, saving results to excel and plotting (if possible)...'
+        my_tep_app.build_pareto_front_by_brute_force(save_to_excel=True, plot_front=True)
+        print 'Ok'
 
-    print 'Building pareto front by brute force, saving results to excel and plotting (if possible)...'
-    my_tep_app.build_pareto_front_by_brute_force(save_to_excel=True, plot_front=True)
-    print 'Ok'
+    plan_id = raw_input("Provide the ID of a plan to inspect, or 'q' to quit: ")
+    while plan_id != 'q':
+        plan_id = int(plan_id)
+        my_tep_app.inspect_transmission_plan(plan_id)
+        plan_id = raw_input("Provide the ID of a plan to inspect, or 'q' to quit: ")
 
-    print 'Done, quitting now'
+    print 'Quitting now'

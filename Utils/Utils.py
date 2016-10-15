@@ -32,6 +32,10 @@ def get_scalar_attributes(obj_instance):
     return d
 
 
+def dict_to_excel_sheet_autoformat(d, writer, sheetname):
+    df_to_excel_sheet_autoformat(dataframe_from_dict(d), writer, sheetname)
+
+
 def df_to_excel_sheet_autoformat(df, writer, sheetname):
     # Convert the dataframe to an XlsxWriter Excel object.
     df.to_excel(writer, sheet_name=sheetname)
@@ -53,7 +57,7 @@ def df_to_excel_sheet_autoformat(df, writer, sheetname):
             col_format = format_percentage
         i1 = xl_col_to_name(idx + 1)
         cols = "{0}:{0}".format(i1)
-        worksheet.set_column(cols, 18, col_format)
+        worksheet.set_column(cols, 10, col_format)
 
 
 def column_header_is_money(col_header):

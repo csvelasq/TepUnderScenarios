@@ -109,7 +109,7 @@ class StaticTePlan(object):
         plan_summary['Plan ID'] = self.get_plan_id()
         # self.plan_summary['Kind'] = -- set elsewhere
         plan_summary['Number of Built Lines'] = len(self.candidate_lines_built)
-        plan_summary['Built Lines'] = map(str, self.candidate_lines_built)
+        plan_summary['Built Lines'] = str(map(str, self.candidate_lines_built))
         plan_summary['Investment Cost [MMUS$]'] = self.get_total_investment_cost()
         for scenario in self.tep_model.tep_system.scenarios:
             plan_summary['Operation Costs {0} [MMUS$]'.format(scenario.name)] = self.operation_costs[scenario]
@@ -124,12 +124,13 @@ class StaticTePlanDetails(object):
         self.plan = plan  # type: StaticTePlan
         # plan summary
         self.plan_summary = self.plan.get_plan_summary()
+        self.plan_df_summary = pd.DataFrame(self.plan_summary, index=['Plan{0}'.format(self.plan_summary['Plan ID'])])
         # get detailed solutions for each scenario
         self.scenarios_results = opf.ScenariosOpfModelResults(self.plan.scenario_simulation_model)
-        for scenario in self.plan.tep_model.tep_system.scenarios:
-            self.scenarios_results.scenarios_models_summaries[scenario.name][
-                'Total Costs (investment + operation) [MMUS$]'] = self.plan.total_costs[scenario]
-        self.df_summary = pd.DataFrame(self.scenarios_results.scenarios_models_summaries).transpose()
+        # for scenario in self.plan.tep_model.tep_system.scenarios:
+        #     self.scenarios_results.scenarios_models_summaries[scenario.name][
+        #         'Total Costs (investment + operation) [MMUS$]'] = self.plan.total_costs[scenario]
+        # self.df_summary = pd.DataFrame(self.scenarios_results.scenarios_models_summaries).transpose()
 
     def to_excel(self, filename):
         writer = pd.ExcelWriter(filename, engine='xlsxwriter')
@@ -139,7 +140,7 @@ class StaticTePlanDetails(object):
 
     def to_excel_sheets(self, writer):
         sheetname_summary = 'Plan{0}'.format(self.plan_summary['Plan ID'])
-        Utils.dict_to_excel_sheet_autoformat(self.plan_summary, writer, sheetname_summary)
+        Utils.df_to_excel_sheet_autoformat(self.plan_df_summary, writer, sheetname_summary)
         self.scenarios_results.to_excel_sheets(writer)
 
 

@@ -124,7 +124,7 @@ class OpfModelResults(object):
         spot_prices_sol_list = Utils.get_values_from_dict(spot_prices_sol)
         # summary of solution [MW, GWh, US$/h, MUS$, US$/MWh]
         self.summary_sol = collections.OrderedDict()
-        self.summary_sol['Objective Function Value'] = sum(pgen_sol.values())
+        self.summary_sol['Objective Function Value'] = opf_model.get_grb_objective_value()
         self.summary_sol['Total Power Output [MW]'] = sum(pgen_sol.values())
         self.summary_sol['Total Energy Output [GWh]'] = self.summary_sol[
                                                             'Total Power Output [MW]'] * opf_model.state.duration / 1e3
@@ -149,7 +149,7 @@ class OpfModelResults(object):
         self.summary_sol['Maximum Spot Price [US$/MWh]'] = max(spot_prices_sol_list)
         self.summary_sol['Minimum Spot Price [US$/MWh]'] = min(spot_prices_sol_list)
         # TODO fix spot prices, they're wrong in units!
-        self.df_summary = Utils.dataframe_from_dict(self.summary_sol)
+        self.df_summary = pd.DataFrame(self.summary_sol, index=[self.state.name])
         # nodal hourly solution (MW and US$/h)
         self.df_nodal_soln = pd.DataFrame(columns=['Node',
                                                    'Hourly Operation Cost [US$/h]',
@@ -299,13 +299,13 @@ class ScenarioOpfModelResults(object):
                                                             for r in opf_results)
         self.summary_sol['Minimum Spot Price [US$/MWh]'] = min(r.summary_sol['Minimum Spot Price [US$/MWh]']
                                                                for r in opf_results)
-        self.df_summary = Utils.dataframe_from_dict(self.summary_sol, column_values_name=self.model_scenario_name)
+        self.df_summary = pd.DataFrame(self.summary_sol, index=[self.model_scenario_name])
         # join summary of solution for each state in this scenario
-        self.dict_states_summaries = collections.OrderedDict()
+        list_states_summaries = []
         for state in self.scenario.states:
             sname = "{0}_{1}".format(self.scenario.name, state.name)
-            self.dict_states_summaries[sname] = self.opf_models_results[state].summary_sol
-        self.df_states_summaries = pd.DataFrame(self.dict_states_summaries).transpose()
+            list_states_summaries.append(self.opf_models_results[state].df_summary)
+        self.df_states_summaries = pd.concat(list_states_summaries)
         # TODO detailed nodal and line solutions for this scenario (collection of states)
 
     def to_excel(self, filename):
@@ -321,11 +321,9 @@ class ScenarioOpfModelResults(object):
         # summary of operation under all states
         sheetname_states = "AllStates_{0}".format(self.scenario.name)
         Utils.df_to_excel_sheet_autoformat(self.df_states_summaries, writer, sheetname_states)
-
         if recursive:
             for state in self.scenario.states:
-                # self.opf_models_results[state].to_excel_sheets(writer, sheetname_prefix=self.scenario.name)
-                pass
+                self.opf_models_results[state].to_excel_sheets(writer, sheetname_prefix=self.scenario.name + '_')
 
 
 class ScenariosOpfModel(object):
@@ -362,14 +360,18 @@ class ScenariosOpfModelResults(object):
         self.scenarios = scenarios_model.scenarios
         # build detailed solutions for each scenario model and build a summary table of scenarios
         self.scenarios_models_results = collections.OrderedDict()
-        self.scenarios_models_summaries = collections.OrderedDict()
         list_dfs_all_states_summaries = []
+        list_dfs_all_scenarios_summaries = []
         for scenario in self.scenarios:
             self.scenarios_models_results[scenario] = ScenarioOpfModelResults(
                 scenarios_model.model_each_scenario[scenario])
-            self.scenarios_models_summaries[scenario.name] = self.scenarios_models_results[scenario].summary_sol
-            list_dfs_all_states_summaries.append(self.scenarios_models_results[scenario].df_states_summaries)
+            list_dfs_all_scenarios_summaries.append(self.scenarios_models_results[scenario].df_summary)
+            for state in scenario.states:
+                list_dfs_all_states_summaries.append(
+                    pd.DataFrame(self.scenarios_models_results[scenario].opf_models_results[state].summary_sol,
+                                 index=[scenario.name + '_' + state.name]))
         self.df_all_states_summaries = pd.concat(list_dfs_all_states_summaries)
+        self.scenarios_models_summaries = pd.concat(list_dfs_all_scenarios_summaries)
 
     def to_excel(self, filename):
         writer = pd.ExcelWriter(filename, engine='xlsxwriter')
@@ -380,8 +382,7 @@ class ScenariosOpfModelResults(object):
     def to_excel_sheets(self, writer, recursive=True):
         # summary of operation under all scenarios, in a single sheet
         sheetname_summary = 'Scenarios'
-        df_summary = pd.DataFrame(self.scenarios_models_summaries).transpose()
-        Utils.df_to_excel_sheet_autoformat(df_summary, writer, sheetname_summary)
+        Utils.df_to_excel_sheet_autoformat(self.scenarios_models_summaries, writer, sheetname_summary)
         # summary of operation under all states, in a single sheet per scenario
         sheetname_summary = 'AllStates'
         Utils.df_to_excel_sheet_autoformat(self.df_all_states_summaries, writer, sheetname_summary)

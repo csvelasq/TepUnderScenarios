@@ -28,7 +28,8 @@ class TepScenariosModel(object):
     def import_from_excel(excel_filepath):
         imported_tep_system = pwsp.PowerSystemTransmissionPlanning.import_from_excel(excel_filepath)
         params = Utils.excel_worksheet_to_dict(excel_filepath, 'TepParameters')
-        opf_model_params = opf.OpfModelParameters(load_shedding_cost=params['load_shedding_cost'])
+        opf_model_params = opf.OpfModelParameters(load_shedding_cost=params['load_shedding_cost'],
+                                                  base_mva=params['base_mva'])
         tep_scenarios_model_parameters = \
             TepScenariosModelParameters(opf_model_params,
                                         investment_costs_multiplier=params['investment_costs_multiplier'],

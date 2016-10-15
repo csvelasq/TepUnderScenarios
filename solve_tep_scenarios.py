@@ -112,8 +112,11 @@ class TepSolverApp(object):
 
 if __name__ == '__main__':
     # set this to a default; if it doesn't exist, I will ask for another directory
-    default_workspace_path = r"C:\Users\cvelasquez\Google Drive\2016 Paper TEP IEEEGM2017\07 Casos de estudio\Python\Garver6"
-    my_tep_app = TepSolverApp.open_workspace(default_workspace_path)  # type: TepSolverApp
+    default_workspace_master_path = r"C:\Users\cvelasquez\Google Drive\2016 Paper TEP IEEEGM2017\07 Casos de estudio\Python"
+    default_case = "Validation30bus"
+    # default_case = "Garver6"
+    my_tep_app = TepSolverApp.open_workspace(
+        os.path.join(default_workspace_master_path, default_case))  # type: TepSolverApp
 
     build_pareto = raw_input('Build pareto front (y/n): [y]')
     if build_pareto == "" or build_pareto == "y":

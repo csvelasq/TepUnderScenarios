@@ -8,12 +8,14 @@ import Utils
 
 class OpfModelParameters(object):
     def __init__(self, load_shedding_cost=2000,
+                 base_mva=100,
                  slack_bus=None,
                  bus_angle_min=-grb.GRB.INFINITY, bus_angle_max=grb.GRB.INFINITY,
                  bus_angle_max_difference=None,
                  obj_func_multiplier=1e-6,  # US$ -> MMUS$
                  grb_opt_params=mygrb.GrbOptParameters()):
         self.load_shedding_cost = load_shedding_cost
+        self.base_mva = base_mva
         self.slack_bus = slack_bus
         self.bus_angle_min = bus_angle_min
         self.bus_angle_max = bus_angle_max
@@ -64,7 +66,7 @@ class OpfModel(mygrb.GrbOptModel):
                                                            ub=node_state.load_state,
                                                            obj=lshed_obj * self.opf_model_params.obj_func_multiplier,
                                                            name='Ls{0}_{1}'.format(node_state.node.name, self.state))
-            if node_state.node == self.opf_model_params.slack_bus:
+            if node_state.node == self.slack_bus:
                 self.bus_angle[node_state] = self.model.addVar(lb=0,
                                                                ub=0,
                                                                obj=0)
@@ -98,7 +100,7 @@ class OpfModel(mygrb.GrbOptModel):
             bus_angle_from = self.bus_angle[line_state.node_from_state]
             bus_angle_to = self.bus_angle[line_state.node_to_state]
             # unavailable transmission lines are deactivated but included in the model
-            susceptance = line_state.isavailable * line_state.transmission_line.susceptance
+            susceptance = line_state.isavailable * line_state.transmission_line.susceptance * self.opf_model_params.base_mva
             self.dc_power_flow[line_state] = \
                 self.model.addConstr(self.power_flow[line_state],
                                      grb.GRB.EQUAL,
@@ -121,6 +123,8 @@ class OpfModelResults(object):
         bus_angle_sol = opf_model.get_grb_vars_solution(opf_model.bus_angle)
         power_flow_sol = opf_model.get_grb_vars_solution(opf_model.power_flow)
         spot_prices_sol = opf_model.get_grb_constraints_shadow_prices(opf_model.nodal_power_balance)
+        for key, val in spot_prices_sol.iteritems():
+            spot_prices_sol[key] = val / opf_model.opf_model_params.obj_func_multiplier
         spot_prices_sol_list = Utils.get_values_from_dict(spot_prices_sol)
         # summary of solution [MW, GWh, US$/h, MUS$, US$/MWh]
         self.summary_sol = collections.OrderedDict()
@@ -190,9 +194,9 @@ class OpfModelResults(object):
                                                    'Power Flow [MW]',
                                                    'Thermal Capacity [MW]',
                                                    'Utilization [%]',
-                                                   'Spot price from [rad]',
-                                                   'Spot price to [rad]',
-                                                   'Spot price from-to [rad]',
+                                                   'Spot price from [US$/MWh]',
+                                                   'Spot price to [US$/MWh]',
+                                                   'Spot price from-to [US$/MWh]',
                                                    'Angle from [rad]',
                                                    'Angle to [rad]',
                                                    'Angle from-to [rad]',

@@ -1,10 +1,21 @@
-import logging
 import os
 import tepmodel as tep
 import Utils
+import logging
+import time
 
-
-# logger = logging.getLogger(__name__)
+# Debug messages go to console and to log_tep_MMDDYYYY.log
+logFileName = 'logs\log_tep_' + time.strftime("%m%d%Y") + '.log'
+logging.basicConfig(filename=logFileName, level=logging.DEBUG, format='%(asctime)s:%(funcName)s:%(lineno)d:%(message)s')
+myConsoleHandler = logging.StreamHandler()
+myConsoleHandler.setLevel(logging.DEBUG)
+logging.getLogger().addHandler(myConsoleHandler)
+# Info messages go to console and to log_info_tep_MMDDYYYY.log
+logInfoFileName = 'logs\log_info_tep_' + time.strftime("%m%d%Y") + '.log'
+infoFileHandler = logging.FileHandler(logInfoFileName)
+infoFileHandler.setLevel(logging.INFO)
+infoFileHandler.setFormatter(logging.Formatter(fmt='%(asctime)s:%(funcName)s:%(lineno)d:%(message)s'))
+logging.getLogger().addHandler(infoFileHandler)
 
 
 class TepSolverApp(object):
@@ -16,15 +27,12 @@ class TepSolverApp(object):
         self.set_current_testcase_instance(instance_name)
         self.pareto_excel_filename = None
         self.pareto_plot_filename = None
-        self.log_path = os.path.join(self.workspace_dir, "log{0}.log".format(self.tep_case_name))
-        logging.basicConfig(filename=self.log_path,
-                            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                            level=logging.DEBUG)
         # the name of the current test case defaults to the same name of the containing folder
         self.tep_case_filename = self.tep_case_name + '.xlsx'
         self.tep_model = self.open_new_tep_model_instance()
         self.tep_pareto_brute_solver = None
         self.tep_pareto_brute_solver_summary = None
+        logging.info("Successfully opened case '{0}' from path '{1}'".format(self.tep_case_name, self.workspace_dir))
 
     def from_relative_to_abs_path(self, relpath):
         """Transforms a relative path to absolute path in this workspace's directory.
@@ -113,8 +121,8 @@ class TepSolverApp(object):
 if __name__ == '__main__':
     # set this to a default; if it doesn't exist, I will ask for another directory
     default_workspace_master_path = r"C:\Users\cvelasquez\Google Drive\2016 Paper TEP IEEEGM2017\07 Casos de estudio\Python"
-    default_case = "Validation30bus"
-    # default_case = "Garver6"
+    # default_case = "Validation30bus"
+    default_case = "Garver6"
     my_tep_app = TepSolverApp.open_workspace(
         os.path.join(default_workspace_master_path, default_case))  # type: TepSolverApp
 
@@ -124,10 +132,10 @@ if __name__ == '__main__':
         my_tep_app.build_pareto_front_by_brute_force(save_to_excel=True, plot_front=True)
         print 'Ok'
 
-    plan_id = raw_input("Provide the ID of a plan to inspect, or 'q' to quit: ")
-    while plan_id != 'q':
-        plan_id = int(plan_id)
-        my_tep_app.inspect_transmission_plan(plan_id)
-        plan_id = raw_input("Provide the ID of a plan to inspect, or 'q' to quit: ")
+    plan_id_input = raw_input("Provide the ID of a plan to inspect, or 'q' to quit: ")
+    while plan_id_input != 'q':
+        plan_id_input = int(plan_id_input)
+        my_tep_app.inspect_transmission_plan(plan_id_input)
+        plan_id_input = raw_input("Provide the ID of a plan to inspect, or 'q' to quit: ")
 
     print 'Quitting now'

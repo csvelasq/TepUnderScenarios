@@ -6,6 +6,9 @@ from plotly.graph_objs import Scatter, Layout
 import pandas as pd
 import xlsxwriter
 import collections
+import logging
+import time
+from datetime import timedelta
 
 
 class TepScenariosModelParameters(object):
@@ -28,8 +31,9 @@ class TepScenariosModel(object):
     def import_from_excel(excel_filepath):
         imported_tep_system = pwsp.PowerSystemTransmissionPlanning.import_from_excel(excel_filepath)
         params = Utils.excel_worksheet_to_dict(excel_filepath, 'TepParameters')
+        base_mva = 100 if 'base_mva' not in params.keys() else params['base_mva']
         opf_model_params = opf.OpfModelParameters(load_shedding_cost=params['load_shedding_cost'],
-                                                  base_mva=params['base_mva'])
+                                                  base_mva=base_mva)
         tep_scenarios_model_parameters = \
             TepScenariosModelParameters(opf_model_params,
                                         investment_costs_multiplier=params['investment_costs_multiplier'],
@@ -145,20 +149,42 @@ class StaticTePlanDetails(object):
         self.scenarios_results.to_excel_sheets(writer)
 
 
+class ScenariosTepParetoFrontByBruteForceParams(object):
+    def __init__(self, plans_processed_for_reporting=50):
+        self.plans_processed_for_reporting = plans_processed_for_reporting
+
+
 class ScenariosTepParetoFrontByBruteForce(object):
-    def __init__(self, tep_model):
-        # type: (TepScenariosModel) -> None
+    def __init__(self, tep_model, pareto_brute_force_params=ScenariosTepParetoFrontByBruteForceParams()):
+        # type: (TepScenariosModel, ScenariosTepParetoFrontByBruteForceParams) -> None
         self.tep_model = tep_model
+        self.pareto_brute_force_params = pareto_brute_force_params
         self.alternatives = []  # type: list[StaticTePlan]
         self.efficient_alternatives = []  # type: list[StaticTePlan]
         # enumerate and evaluate all possible alternatives
-        for plan_id in range(self.tep_model.get_numberof_possible_expansion_plans()):
+        self.number_of_possible_plans = self.tep_model.get_numberof_possible_expansion_plans()
+        logging.info(
+            "Beginning construction of pareto front by brute-force, enumerating all {0} possible transmission expansion plans".format(
+                self.number_of_possible_plans))
+        self.start_clock = time.clock()
+        for plan_id in range(self.number_of_possible_plans):
             alternative = StaticTePlan.from_id(self.tep_model, plan_id)
             self.alternatives.append(alternative)
+            if (plan_id % self.pareto_brute_force_params.plans_processed_for_reporting) == 0:
+                self.elapsed_time = time.clock() - self.start_clock
+                logging.info(
+                    "Processed {0} / {1} alternatives (elapsed: {2})...".format(plan_id, self.number_of_possible_plans,
+                                                                                str(timedelta(
+                                                                                    seconds=self.elapsed_time))))
+        logging.info(
+            "Finished processing all {0} possible transmission expansion plans, proceeding to build pareto front.".format(
+                self.number_of_possible_plans))
         # build pareto front
         for plan in self.alternatives:
             if plan.is_nondominated(self.alternatives):
                 self.efficient_alternatives.append(plan)
+        logging.info("Finished building pareto front: {0} efficient transmission expansion alternatives.".format(
+            len(self.efficient_alternatives)))
 
     def get_dominated_alternatives(self):
         return (alt for alt in self.alternatives if alt not in self.efficient_alternatives)

@@ -1,6 +1,7 @@
 import pandas as pd
 import PowerSystem as pws
 import PowerSystemState as pwstate
+import logging
 
 
 class PowerSystemScenario(object):
@@ -44,5 +45,10 @@ class PowerSystemScenario(object):
                     node_state.available_generating_capacity = row["Gx-{0}-{1}".format(scenario.name, state.name)]
                     node_state.generation_marginal_cost = row["MG-{0}-{1}".format(scenario.name, state.name)]
                     # verify imported data
-                    assert node_state.available_generating_capacity <= node_state.node.installed_generating_capacity
+                    # assert node_state.available_generating_capacity <= node_state.node.installed_generating_capacity
+                    if node_state.available_generating_capacity > node_state.node.installed_generating_capacity:
+                        logging.warning(
+                            "Error importing node '{0}': available generating capacity={1} MW in state '{2}' exceeds installed generating capacity of {3} MW.".format(
+                                node_state.node.name, node_state.available_generating_capacity, state.name,
+                                node_state.node.installed_generating_capacity))
         return imported_scenarios

@@ -59,6 +59,9 @@ class Node(PowerSystemElement):
         self.installed_generating_capacity = installed_generating_capacity
         self.generation_marginal_cost = generation_marginal_cost
 
+    def get_maximum_gen_energy(self, hours):
+        return self.installed_generating_capacity * hours
+
 
 class TransmissionLine(PowerSystemElement):
     def __init__(self, system, name, node_from, node_to, susceptance, thermal_capacity):
@@ -68,3 +71,6 @@ class TransmissionLine(PowerSystemElement):
         self.node_to = node_to
         self.susceptance = susceptance
         self.thermal_capacity = thermal_capacity
+
+    def __str__(self):
+        return self.name + "({}-{})".format(self.node_from.name, self.node_to.name)

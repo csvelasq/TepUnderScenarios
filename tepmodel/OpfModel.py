@@ -107,6 +107,14 @@ class OpfModel(mygrb.GrbOptModel):
                                      susceptance * bus_angle_from - susceptance * bus_angle_to)
             # TODO Create bus angle difference constraint, based on self.bus_angle_max_difference
 
+    def get_lmps(self):
+        """Calculates nodal spot prices for the solution in this opf"""
+        assert self.is_solved_to_optimality()
+        shadow_prices = self.get_grb_constraints_shadow_prices(self.nodal_power_balance)
+        for key, val in shadow_prices.iteritems():
+            shadow_prices[key] = val / (self.opf_model_params.obj_func_multiplier * self.state.duration)
+        return shadow_prices
+
 
 class OpfModelResults(object):
     """Detailed results for a solved OPF model"""
@@ -122,69 +130,80 @@ class OpfModelResults(object):
         load_shed_sol = opf_model.get_grb_vars_solution(opf_model.load_shed)
         bus_angle_sol = opf_model.get_grb_vars_solution(opf_model.bus_angle)
         power_flow_sol = opf_model.get_grb_vars_solution(opf_model.power_flow)
-        spot_prices_sol = opf_model.get_grb_constraints_shadow_prices(opf_model.nodal_power_balance)
-        for key, val in spot_prices_sol.iteritems():
-            spot_prices_sol[key] = val / opf_model.opf_model_params.obj_func_multiplier
+        spot_prices_sol = opf_model.get_lmps()
         spot_prices_sol_list = Utils.get_values_from_dict(spot_prices_sol)
         # summary of solution [MW, GWh, US$/h, MUS$, US$/MWh]
         self.summary_sol = collections.OrderedDict()
         self.summary_sol['Objective Function Value'] = opf_model.get_grb_objective_value()
+        self.summary_sol['State Duration [hours]'] = self.state.duration
+        hourly_gen_costs = sum(pgen_sol[node_state] * node_state.generation_marginal_cost
+                               for node_state in opf_model.state.node_states)
+        hourly_ls_costs = sum(load_shed_sol[node_state] * opf_model.opf_model_params.load_shedding_cost
+                              for node_state in opf_model.state.node_states)
+        self.summary_sol['Total Operation Costs [MMUS$]'] = (
+                                                                hourly_gen_costs + hourly_ls_costs) * self.state.duration / 1e6
+        self.summary_sol['Total Generation Costs [MMUS$]'] = hourly_gen_costs * self.state.duration / 1e6
+        self.summary_sol['Total Load Shedding Costs [MMUS$]'] = hourly_ls_costs * self.state.duration / 1e6
+        self.summary_sol['Relative Load Shedding Costs [%]'] = self.summary_sol['Total Load Shedding Costs [MMUS$]'] / \
+                                                               self.summary_sol['Total Operation Costs [MMUS$]']
+        self.summary_sol['Congestion Rents [MMUS$]'] = 0
+        self.summary_sol['Congestion Rents / Operation Costs [%]'] = 0
+        self.summary_sol['Hourly Operation Costs [US$/h]'] = hourly_gen_costs + hourly_ls_costs
+        self.summary_sol['Hourly Generation Costs [US$/h]'] = hourly_gen_costs
+        self.summary_sol['Hourly Load Shedding Costs [US$/h]'] = hourly_ls_costs
+        self.summary_sol['Congestion Rents [US$/h]'] = 0  # value is assigned later
+        self.summary_sol['Minimum Spot Price [US$/MWh]'] = min(spot_prices_sol_list)
+        self.summary_sol['Average Spot Price [US$/MWh]'] = float(sum(spot_prices_sol_list)) / len(spot_prices_sol_list)
+        self.summary_sol['Maximum Spot Price [US$/MWh]'] = max(spot_prices_sol_list)
         self.summary_sol['Total Power Output [MW]'] = sum(pgen_sol.values())
         self.summary_sol['Total Energy Output [GWh]'] = self.summary_sol[
                                                             'Total Power Output [MW]'] * opf_model.state.duration / 1e3
         # TODO add total generation utilization percent, here and in derived results as well
-        self.summary_sol['Total Load Shed [MW]'] = sum(load_shed_sol.values())
+        demand = self.state.get_total_demand_power()
+        self.summary_sol['Total Demand [MW]'] = demand
+        self.summary_sol['Total Demand [GWh]'] = self.state.get_total_demand_energy()
+        ls = sum(load_shed_sol.values())
+        self.summary_sol['Total Load Shed [MW]'] = ls
         self.summary_sol['Total Energy Shed [GWh]'] = self.summary_sol[
                                                           'Total Load Shed [MW]'] * opf_model.state.duration / 1e3
-        self.summary_sol['Hourly Generation Costs [US$/h]'] = sum(
-            pgen_sol[node_state] * node_state.generation_marginal_cost
-            for node_state in opf_model.state.node_states)
-        self.summary_sol['Total Generation Costs [MMUS$]'] = self.summary_sol[
-                                                                 'Hourly Generation Costs [US$/h]'] * opf_model.state.duration / 1e6
-        self.summary_sol['Hourly Load Shedding Costs [US$/h]'] = self.summary_sol[
-                                                                     'Total Load Shed [MW]'] * opf_model.opf_model_params.load_shedding_cost
-        self.summary_sol['Total Load Shedding Costs [MMUS$]'] = self.summary_sol[
-                                                                    'Hourly Load Shedding Costs [US$/h]'] * opf_model.state.duration / 1e6
-        self.summary_sol['Hourly Operation Costs [US$/h]'] = self.summary_sol['Hourly Generation Costs [US$/h]'] + \
-                                                             self.summary_sol['Hourly Load Shedding Costs [US$/h]']
-        self.summary_sol['Total Operation Costs [MMUS$]'] = self.summary_sol[
-                                                                'Hourly Operation Costs [US$/h]'] * opf_model.state.duration / 1e6
-        self.summary_sol['Average Spot Price [US$/MWh]'] = float(sum(spot_prices_sol_list)) / len(spot_prices_sol_list)
-        self.summary_sol['Maximum Spot Price [US$/MWh]'] = max(spot_prices_sol_list)
-        self.summary_sol['Minimum Spot Price [US$/MWh]'] = min(spot_prices_sol_list)
-        # TODO fix spot prices, they're wrong in units!
-        self.df_summary = pd.DataFrame(self.summary_sol, index=[self.state.name])
+        self.summary_sol['Relative Load Shedding [%]'] = Utils.get_utilization(ls, demand)
+        self.is_load_lost = ls > 0
         # nodal hourly solution (MW and US$/h)
         self.df_nodal_soln = pd.DataFrame(columns=['Node',
                                                    'Hourly Operation Cost [US$/h]',
                                                    'Hourly Generation Cost [US$/h]',
                                                    'Hourly Load Shedding Cost [US$/h]',
+                                                   'Relative Load Shedding Cost [%]',
                                                    'Spot Price [US$/MWh]',
                                                    'Marginal Generation Cost [US$/MWh]',
                                                    'Power Generated [MW]',
                                                    'Available Generating Capacity [MW]',
-                                                   'Generation Utilization [%]',
-                                                   'Load Shed [MW]',
+                                                   'Generation Capacity Factor [%]',
                                                    'Load [MW]',
+                                                   'Load Shed [MW]',
                                                    'Consumption [MW]',
+                                                   'Relative Load Shed [%]',
                                                    'Bus Angle [rad]'])
         n = 0
         for node_state in opf_model.state.node_states:
             # costs are converted back from MMUS$ to US$
             pcost = pgen_sol[node_state] * node_state.generation_marginal_cost
             lscost = load_shed_sol[node_state] * opf_model.opf_model_params.load_shedding_cost
+            op_cost = pcost + lscost
             row = [node_state.node.name,
-                   pcost + lscost,
+                   op_cost,
                    pcost,
                    lscost,
+                   Utils.get_utilization(lscost, op_cost),
                    spot_prices_sol[node_state],
                    node_state.generation_marginal_cost,
                    pgen_sol[node_state],
                    node_state.available_generating_capacity,
                    Utils.get_utilization(pgen_sol[node_state], node_state.available_generating_capacity),
-                   load_shed_sol[node_state],
                    node_state.load_state,
+                   load_shed_sol[node_state],
                    node_state.load_state - load_shed_sol[node_state],
+                   Utils.get_utilization(load_shed_sol[node_state], node_state.load_state),
                    bus_angle_sol[node_state]]
             self.df_nodal_soln.loc[n] = row
             n += 1
@@ -197,13 +216,19 @@ class OpfModelResults(object):
                                                    'Spot price from [US$/MWh]',
                                                    'Spot price to [US$/MWh]',
                                                    'Spot price from-to [US$/MWh]',
+                                                   'Congestion Rents [US$/h]',
+                                                   'Congestion Rents [MMUS$]',
                                                    'Angle from [rad]',
                                                    'Angle to [rad]',
                                                    'Angle from-to [rad]',
                                                    'Susceptance [pu]'])
         n = 0
+        total_congestion_rents = 0
         for line_state in opf_model.state.transmission_lines_states:
-            row = [line_state.transmission_line.name,
+            spot_diff = spot_prices_sol[line_state.node_from_state] - spot_prices_sol[line_state.node_to_state]
+            congestion_rent = abs(spot_diff * power_flow_sol[line_state])
+            total_congestion_rents += congestion_rent
+            row = [str(line_state.transmission_line),
                    line_state.isavailable,
                    power_flow_sol[line_state],
                    line_state.transmission_line.thermal_capacity,
@@ -211,13 +236,22 @@ class OpfModelResults(object):
                                          line_state.transmission_line.thermal_capacity),
                    spot_prices_sol[line_state.node_from_state],
                    spot_prices_sol[line_state.node_to_state],
-                   spot_prices_sol[line_state.node_from_state] - spot_prices_sol[line_state.node_to_state],
+                   spot_diff,
+                   congestion_rent,
+                   congestion_rent * self.state.duration / 1e6,
                    bus_angle_sol[line_state.node_from_state],
                    bus_angle_sol[line_state.node_to_state],
                    bus_angle_sol[line_state.node_from_state] - bus_angle_sol[line_state.node_to_state],
                    line_state.transmission_line.susceptance]
             self.df_lines_soln.loc[n] = row
             n += 1
+        self.summary_sol['Congestion Rents [US$/h]'] = total_congestion_rents
+        self.summary_sol['Congestion Rents [MMUS$]'] = total_congestion_rents * self.state.duration / 1e6
+        self.summary_sol['Congestion Rents / Operation Costs [%]'] = self.summary_sol[
+                                                                         'Congestion Rents [MMUS$]'] / \
+                                                                     self.summary_sol[
+                                                                         'Total Operation Costs [MMUS$]']
+        self.df_summary = pd.DataFrame(self.summary_sol, index=[self.state.name])
         # print solution if required
         if print_solution:
             self.print_to_console()
@@ -241,9 +275,10 @@ class OpfModelResults(object):
         # Close the Pandas Excel writer and output the Excel file.
         writer.save()
 
-    def to_excel_sheets(self, writer, sheetname_prefix=""):
-        sheetname_summary = sheetname_prefix + "{0}_summary".format(self.state.name)
-        Utils.df_to_excel_sheet_autoformat(self.df_summary, writer, sheetname_summary)
+    def to_excel_sheets(self, writer, sheetname_prefix="", recursive=False):
+        if not recursive:
+            sheetname_summary = sheetname_prefix + "{0}_summary".format(self.state.name)
+            Utils.df_to_excel_sheet_autoformat(self.df_summary, writer, sheetname_summary)
         sheetname_nodal = sheetname_prefix + "{0}_nodes".format(self.state.name)
         Utils.df_to_excel_sheet_autoformat(self.df_nodal_soln, writer, sheetname_nodal)
         sheetname_lines = sheetname_prefix + "{0}_lines".format(self.state.name)
@@ -286,23 +321,35 @@ class ScenarioOpfModelResults(object):
         self.obj_val = scenario_model.get_grb_objective_value()
         self.summary_sol = collections.OrderedDict()
         self.summary_sol['Objective Function Value'] = self.obj_val
-        self.summary_sol['Total Energy Output [GWh]'] = sum(r.summary_sol['Total Energy Output [GWh]']
-                                                            for r in opf_results)
-        self.summary_sol['Total Energy Shed [GWh]'] = sum(r.summary_sol['Total Energy Shed [GWh]']
-                                                          for r in opf_results)
+        self.summary_sol['Total Operation Costs [MMUS$]'] = sum(r.summary_sol['Total Operation Costs [MMUS$]']
+                                                                for r in opf_results)
         self.summary_sol['Total Generation Costs [MMUS$]'] = sum(r.summary_sol['Total Generation Costs [MMUS$]']
                                                                  for r in opf_results)
         self.summary_sol['Total Load Shedding Costs [MMUS$]'] = sum(r.summary_sol['Total Load Shedding Costs [MMUS$]']
                                                                     for r in opf_results)
-        self.summary_sol['Total Operation Costs [MMUS$]'] = sum(r.summary_sol['Total Operation Costs [MMUS$]']
-                                                                for r in opf_results)
+        self.summary_sol['Relative Load Shedding Costs [%]'] = self.summary_sol['Total Load Shedding Costs [MMUS$]'] / \
+                                                               self.summary_sol['Total Operation Costs [MMUS$]']
+        self.summary_sol['Congestion Rents [MMUS$]'] = sum(r.summary_sol['Congestion Rents [MMUS$]']
+                                                           for r in opf_results)
+        self.summary_sol['Congestion Rents / Operation Costs [%]'] = self.summary_sol['Congestion Rents [MMUS$]'] / \
+                                                                     self.summary_sol['Total Operation Costs [MMUS$]']
+        self.summary_sol['Minimum Spot Price [US$/MWh]'] = min(r.summary_sol['Minimum Spot Price [US$/MWh]']
+                                                               for r in opf_results)
         self.summary_sol['Average Spot Price [US$/MWh]'] = sum(
             r.summary_sol['Average Spot Price [US$/MWh]'] * r.state.duration
             for r in opf_results) / sum(r.state.duration for r in opf_results)
         self.summary_sol['Peak Spot Price [US$/MWh]'] = max(r.summary_sol['Maximum Spot Price [US$/MWh]']
                                                             for r in opf_results)
-        self.summary_sol['Minimum Spot Price [US$/MWh]'] = min(r.summary_sol['Minimum Spot Price [US$/MWh]']
-                                                               for r in opf_results)
+        self.summary_sol['Total Energy Output [GWh]'] = sum(r.summary_sol['Total Energy Output [GWh]']
+                                                            for r in opf_results)
+        total_demand = sum(r.summary_sol['Total Demand [GWh]']
+                           for r in opf_results)
+        self.summary_sol['Total Energy Demand [GWh]'] = total_demand
+        self.summary_sol['Total Energy Shed [GWh]'] = sum(r.summary_sol['Total Energy Shed [GWh]']
+                                                          for r in opf_results)
+        self.summary_sol['Relative Energy Shed [%]'] = self.summary_sol['Total Energy Shed [GWh]'] / total_demand
+        self.summary_sol['Loss of Load [hours]'] = sum(r.is_load_lost * r.state.duration
+                                                       for r in opf_results)
         self.df_summary = pd.DataFrame(self.summary_sol, index=[self.model_scenario_name])
         # join summary of solution for each state in this scenario
         list_states_summaries = []
@@ -319,15 +366,17 @@ class ScenarioOpfModelResults(object):
         writer.save()
 
     def to_excel_sheets(self, writer, recursive=False):
-        # summary of this scenario
-        sheetname_summary = "{0}".format(self.scenario.name)
-        Utils.df_to_excel_sheet_autoformat(self.df_summary, writer, sheetname_summary)
-        # summary of operation under all states
+        # summary of this scenario. if recursive, this summary is written along other scenarios
+        if not recursive:
+            sheetname_summary = "{0}".format(self.scenario.name)
+            Utils.df_to_excel_sheet_autoformat(self.df_summary, writer, sheetname_summary)
+        # summary of operation under all states of this scenario
         sheetname_states = "AllStates_{0}".format(self.scenario.name)
         Utils.df_to_excel_sheet_autoformat(self.df_states_summaries, writer, sheetname_states)
         if recursive:
             for state in self.scenario.states:
-                self.opf_models_results[state].to_excel_sheets(writer, sheetname_prefix=self.scenario.name + '_')
+                self.opf_models_results[state].to_excel_sheets(writer, sheetname_prefix=self.scenario.name + '_',
+                                                               recursive=recursive)
 
 
 class ScenariosOpfModel(object):
@@ -383,7 +432,7 @@ class ScenariosOpfModelResults(object):
         # Close the Pandas Excel writer and output the Excel file.
         writer.save()
 
-    def to_excel_sheets(self, writer, recursive=True):
+    def to_excel_sheets(self, writer, recursive=False):
         # summary of operation under all scenarios, in a single sheet
         sheetname_summary = 'Scenarios'
         Utils.df_to_excel_sheet_autoformat(self.scenarios_models_summaries, writer, sheetname_summary)

@@ -22,6 +22,18 @@ class PowerSystemState(object):
     def __str__(self):
         return self.name
 
+    def get_total_demand_power(self):
+        return sum(n.load_state for n in self.node_states)
+
+    def get_total_demand_energy(self):
+        return self.get_total_demand_power() * self.duration / 1e3
+
+    def get_total_gen_capacity(self):
+        return sum(n.available_generating_capacity for n in self.node_states)
+
+    def get_maximum_gen_energy(self):
+        return self.get_total_gen_capacity() * self.duration
+
 
 class PowerSystemElementState(object):
     def __init__(self, system_state, element):
@@ -51,6 +63,9 @@ class NodeState(PowerSystemElementState):
     def find_outgoing_lines_states(self):
         return (line_state for line_state in self.system_state.transmission_lines_states
                 if line_state.node_from_state == self)
+
+    def get_maximum_gen_energy(self):
+        return self.available_generating_capacity * self.system_state.duration
 
     def __str__(self):
         return self.node.name

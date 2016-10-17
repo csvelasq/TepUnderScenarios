@@ -88,6 +88,23 @@ def get_utilization(output, max_capacity):
     return float("nan") if max_capacity == 0 else float(output) / max_capacity
 
 
+def get_yesno_answer_console(message="Proceed (y/n)?: ", default_answer=True):
+    assert isinstance(default_answer, bool)
+    answer_bool = None
+    msg = message + " [{}] ".format('y' if default_answer else 'n')
+    while answer_bool is None:
+        answer = raw_input(msg)
+        if answer == "":
+            answer_bool = default_answer
+        elif answer == 'y':
+            answer_bool = True
+        elif answer == 'n':
+            answer_bool = False
+        else:
+            print "Yes or no answers only"
+    return answer_bool
+
+
 def try_save_file(filename, filesaver):
     """Tries to save a file
 

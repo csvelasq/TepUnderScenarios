@@ -24,7 +24,7 @@ class CandidateTransmissionLine(object):
         return candidate_lines
 
     def __str__(self):
-        return self.transmission_line.name
+        return str(self.transmission_line)
 
 
 class PowerSystemTransmissionPlanning(object):

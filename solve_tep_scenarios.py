@@ -151,6 +151,13 @@ class TepSolverApp(object):
 
 
 if __name__ == '__main__':
+    excel_filepath = r"C:\Users\cvelasquez\Google Drive\2016 Paper TEP IEEEGM2017\07 Casos de estudio\Python\Garver6\Garver6_output12candidates_17oct\Garver6.xlsx"
+    efficient_ids = [3220, 3716, 244, 180]
+    tep_model = tep.TepScenariosModel.import_from_excel(excel_filepath)
+    efficient_plans = list(tep.StaticTePlan.from_id(tep_model, plan_id) for plan_id in efficient_ids)
+    robustness_calculator = tep.Robustness2ndOrderMeasure(efficient_plans)
+    print "done"
+
     # set this to a default; if it doesn't exist, I will ask for another directory
     default_workspace_master_path = r"C:\Users\cvelasquez\Google Drive\2016 Paper TEP IEEEGM2017\07 Casos de estudio\Python"
     # default_case = "Validation30bus"

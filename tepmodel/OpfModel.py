@@ -392,7 +392,7 @@ class ScenariosOpfModel(object):
         self.model_each_scenario = dict()
         for scenario in self.scenarios:
             self.model_each_scenario[scenario] = ScenarioOpfModel(scenario, self.opf_model_params, model=grb.Model(''))
-        self.operation_costs_scenarios = dict()
+        self.operation_costs_scenarios = collections.OrderedDict()
 
     def solve(self):
         """Simulates the optimal operation for each scenario

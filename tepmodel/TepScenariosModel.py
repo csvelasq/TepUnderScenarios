@@ -46,7 +46,7 @@ class TepScenariosModel(object):
         params = tep_scenarios_model_parameters
         if params is None:
             params = self.tep_scenarios_model_parameters
-        total_costs = dict()
+        total_costs = collections.OrderedDict()
         investment_cost = plan.get_total_investment_cost()
         # modify all scenarios so as to build lines in the provided plan
         # AFFECTS ALL REFERENCES TO THE PowerSystemTransmissionPlanning INSTANCE!
@@ -123,6 +123,9 @@ class StaticTePlan(object):
                                                                                            scenario] * self.tep_model.tep_scenarios_model_parameters.operation_costs_multiplier
             plan_summary['Total Costs {0} [MMUS$]'.format(scenario.name)] = self.total_costs[scenario]
         return plan_summary
+
+    def __str__(self):
+        return "Plan {}".format(self.get_plan_id())
 
 
 class StaticTePlanDetails(object):

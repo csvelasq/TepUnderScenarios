@@ -124,6 +124,26 @@ class StaticTePlan(object):
             plan_summary['Total Costs {0} [MMUS$]'.format(scenario.name)] = self.total_costs[scenario]
         return plan_summary
 
+    def regret(self, optimal_plan, scenario):
+        """Calculates the regret of this expansion plan in a given scenario, provided the optimal plan for that scenario
+
+        :param optimal_plan: Optimal plan under the provided scenario
+        :param scenario: The scenario for which regret is calculated
+        :return:The regret (lost opportunity cost)
+        """
+        # type: (StaticTePlan, powersys.PowerSystemScenario) -> float
+        return self.total_costs[scenario] - optimal_plan.total_costs[scenario]
+
+    def max_regret(self, optimal_plans):
+        """Calculates the maximum regret for this plan among all scenarios
+
+        :param optimal_plans: The set of optimal plans for each scenario
+        :return: The maximum regret of this transmission expansion plan
+        """
+        # type: (Dict[powersys.PowerSystemScenario, StaticTePlan]) -> float
+        return max(self.regret(optimal_plans[scenario], scenario)
+                   for scenario in self.tep_model.tep_system.scenarios)
+
     def __str__(self):
         return "Plan {}".format(self.get_plan_id())
 
@@ -178,34 +198,50 @@ class ScenariosTepParetoFrontByBruteForce(object):
         self.efficient_alternatives = []  # type: list[StaticTePlan]
         # enumerate and evaluate all possible alternatives
         self.number_of_possible_plans = self.tep_model.get_numberof_possible_expansion_plans()
+        self.best_plan_scenario = collections.OrderedDict()
+        for scenario in self.tep_model.tep_system.scenarios:
+            self.best_plan_scenario[scenario] = None
         self.start_clock = time.clock()
+        self.eval_all_alternatives()
+        self.stop_time = time.clock()
+        self.elapsed_seconds = self.stop_time - self.start_clock
+
+    def eval_all_alternatives(self):
         for plan_id in range(self.number_of_possible_plans):
             # build and solve plan
             alternative = StaticTePlan.from_id(self.tep_model, plan_id)
-            # update efficient set of plans with the newly created plan
-            dominated_to_remove = []
-            alternative_is_efficient = True
-            for idx, other_alt in enumerate(self.efficient_alternatives):
-                if other_alt.dominates(alternative):
-                    alternative_is_efficient = False
-                    break
-                elif alternative.dominates(other_alt):
-                    dominated_to_remove.append(other_alt)
-            self.efficient_alternatives = [a for a in self.efficient_alternatives
-                                           if a not in dominated_to_remove]
-            if alternative_is_efficient:
-                self.efficient_alternatives.append(alternative)
+            # update set of efficient plans with the newly created plan
+            self.update_set_of_efficient_plans(alternative)
             # record plan anyway if all alternatives are being saved
             if self.pareto_brute_force_params.save_all_alternatives:
                 self.all_alternatives.append(alternative)
             # report progress
             if (plan_id % self.pareto_brute_force_params.plans_processed_for_reporting) == 0:
-                self.elapsed_time = time.clock() - self.start_clock
+                elapsed_time = time.clock() - self.start_clock
                 logging.info(("Processed {0} / {1} alternatives "
                               "(elapsed: {2})...").format(plan_id, self.number_of_possible_plans,
-                                                          str(timedelta(seconds=self.elapsed_time))
+                                                          str(timedelta(seconds=elapsed_time))
                                                           )
                              )
+
+    def update_set_of_efficient_plans(self, alternative):
+        dominated_to_remove = []
+        alternative_is_efficient = True
+        for idx, other_alt in enumerate(self.efficient_alternatives):
+            if other_alt.dominates(alternative):
+                alternative_is_efficient = False
+                break
+            elif alternative.dominates(other_alt):
+                dominated_to_remove.append(other_alt)
+        self.efficient_alternatives = [a for a in self.efficient_alternatives
+                                       if a not in dominated_to_remove]
+        if alternative_is_efficient:
+            self.efficient_alternatives.append(alternative)
+            # update best plan for each scenario
+            for scenario in self.tep_model.tep_system.scenarios:
+                if self.best_plan_scenario[scenario] is None \
+                        or alternative.total_costs[scenario] < self.best_plan_scenario[scenario].total_costs[scenario]:
+                    self.best_plan_scenario[scenario] = alternative
 
     def get_dominated_alternatives(self):
         return (alt for alt in self.all_alternatives if alt not in self.efficient_alternatives)
@@ -281,50 +317,55 @@ class ScenariosTepParetoFrontByBruteForceSummary(object):
 
     def __init__(self, pareto_brute):
         # type: (ScenariosTepParetoFrontByBruteForce) -> None
-        self.save_all_alternatives = pareto_brute.pareto_brute_force_params.save_all_alternatives
-        if self.save_all_alternatives:
-            # Process all alternatives if the user selected such option
-            self.df_all_alternatives = ScenariosTepParetoFrontByBruteForceSummary.summarize_alternatives(
-                pareto_brute.all_alternatives, pareto_brute.efficient_alternatives,
-                alternatives_to_report_progress=100)
-            self.df_efficient_alternatives = self.df_all_alternatives.loc[
-                self.df_all_alternatives['Kind'] == 'Efficient']
-        else:
-            # Process only efficient alternatives
-            self.df_efficient_alternatives = ScenariosTepParetoFrontByBruteForceSummary.summarize_alternatives(
-                pareto_brute.efficient_alternatives, pareto_brute.efficient_alternatives)
+        self.summary_pareto_front = collections.OrderedDict()
+        self.summary_pareto_front['Elapsed time'] = str(timedelta(seconds=pareto_brute.elapsed_seconds))
+        self.summary_pareto_front['Number of Efficient Alternatives'] = len(pareto_brute.efficient_alternatives)
+        self.optimal_plans = collections.OrderedDict()
+        for scenario in pareto_brute.tep_model.tep_system.scenarios:
+            self.optimal_plans[scenario] = pareto_brute.best_plan_scenario[scenario]
+            self.summary_pareto_front['Optimal Plan {}'.format(scenario.name)] = str(self.optimal_plans[scenario])
+            self.summary_pareto_front['Optimal Cost {}'.format(scenario.name)] = \
+                self.optimal_plans[scenario].total_costs[scenario]
+        # Process efficient alternatives
+        self.minimax_cost = float('inf')
+        self.minimax_cost_plan = None
+        self.minimax_regret = float('inf')
+        self.minimax_regret_plan = None
+        self.df_efficient_alternatives = None
+        self.summarize_efficient_alternatives(pareto_brute.efficient_alternatives)
+        self.summary_pareto_front['Minimax Cost Plan'] = str(self.minimax_cost_plan)
+        self.summary_pareto_front['Minimax Cost'] = self.minimax_cost
+        self.summary_pareto_front['Minimax Regret Plan'] = str(self.minimax_regret_plan)
+        self.summary_pareto_front['Minimax Regret'] = self.minimax_regret
+        self.df_summary_pareto_front = pd.DataFrame(self.summary_pareto_front, index=['Value']).transpose()
 
-    @staticmethod
-    def summarize_alternatives(alternatives, efficient_alternatives, alternatives_to_report_progress=None):
+    def summarize_efficient_alternatives(self, efficient_alternatives):
+        # type: (List[StaticTePlan], List[StaticTePlan], float, bool) -> object
+        # TODO save details for each plan in the pareto solver, do not construct details again (it's idiotic)
         list_summaries_alternatives = []
-        number_of_alternatives_to_process = len(alternatives)
-        number_of_processed_alternatives = 0
-        start_clock = time.clock()
-        for alternative in alternatives:
+        for alternative in efficient_alternatives:
             summary = StaticTePlanDetails(alternative).plan_summary
-            summary['Kind'] = 'Efficient' if alternative in efficient_alternatives else 'Dominated'
+            summary['Kind'] = 'Efficient'  # if alternative in efficient_alternatives else 'Dominated'
             summary = pd.DataFrame(summary, index=['Plan{0}'.format(summary['Plan ID'])])
             list_summaries_alternatives.append(summary)
-            number_of_processed_alternatives += 1
-            if alternatives_to_report_progress is not None:
-                if number_of_processed_alternatives % alternatives_to_report_progress == 0:
-                    elapsed_time = time.clock() - start_clock
-                    logging.info(("Processed {0} / {1} alternatives "
-                                  "(elapsed: {2})...").format(number_of_processed_alternatives,
-                                                              number_of_alternatives_to_process,
-                                                              str(timedelta(seconds=elapsed_time))
-                                                              )
-                                 )
-        return pd.concat(list_summaries_alternatives)
+            # updates minimax cost
+            max_cost_this_alternative = max(alternative.total_costs.values())
+            if max_cost_this_alternative < self.minimax_cost:
+                self.minimax_cost = max_cost_this_alternative
+                self.minimax_cost_plan = alternative
+            # updates minimax regret
+            max_regret_this_alternative = alternative.max_regret(self.optimal_plans)
+            if max_regret_this_alternative < self.minimax_regret:
+                self.minimax_regret = max_regret_this_alternative
+                self.minimax_regret_plan = alternative
+        self.df_efficient_alternatives = pd.concat(list_summaries_alternatives)
 
-    def to_excel(self, excel_filename, sheetname='ParetoAlternatives'):
+    def to_excel(self, excel_filename, sheetname=['ParetoAlternatives', 'ParetoSummary']):
         # TODO save detailed solution excel for all efficient alternatives
         writer = pd.ExcelWriter(excel_filename, engine='xlsxwriter')
         self.to_excel_sheet(writer, sheetname=sheetname)
         writer.save()
 
-    def to_excel_sheet(self, writer, sheetname='ParetoAlternatives'):
-        if self.save_all_alternatives:
-            Utils.df_to_excel_sheet_autoformat(self.df_all_alternatives, writer, sheetname)
-        else:
-            Utils.df_to_excel_sheet_autoformat(self.df_efficient_alternatives, writer, sheetname)
+    def to_excel_sheet(self, writer, sheetname=['ParetoAlternatives', 'ParetoSummary']):
+        Utils.df_to_excel_sheet_autoformat(self.df_summary_pareto_front, writer, sheetname[1])
+        Utils.df_to_excel_sheet_autoformat(self.df_efficient_alternatives, writer, sheetname[0])

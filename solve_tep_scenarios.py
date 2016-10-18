@@ -71,11 +71,23 @@ class TepSolverApp(object):
 
     def build_pareto_front_by_brute_force(self, save_to_excel=False, plot_front=False,
                                           save_all=True):
-        my_pareto_params = tep.ScenariosTepParetoFrontByBruteForceParams(
-            save_all_alternatives=save_all, plans_processed_for_reporting=1000)
         logging.info(("Beginning construction of pareto front by brute-force, "
                       "enumerating all {0} possible "
                       "transmission expansion plans").format(self.tep_model.get_numberof_possible_expansion_plans()))
+        if save_all:
+            prob_record = 0.1
+            max_alts_record = 200
+            my_pareto_params = tep.ScenariosTepParetoFrontByBruteForceParams(
+                save_extra_alternatives=save_all,
+                save_alternative_handle=tep.ScenariosTepParetoFrontByBruteForceParams.save_maxrandom_alternatives,
+                save_alternative_handle_params=[prob_record, max_alts_record],
+                plans_processed_for_reporting=1000,
+            )
+            logging.info("At most {} alternatives will be chosen at random (p={:1%}) for recording extra alternatives".
+                         format(max_alts_record, prob_record))
+        else:
+            my_pareto_params = tep.ScenariosTepParetoFrontByBruteForceParams(
+                save_extra_alternatives=save_all, plans_processed_for_reporting=1000)
         self.tep_pareto_brute_solver = tep.ScenariosTepParetoFrontByBruteForce(self.tep_model,
                                                                                pareto_brute_force_params=my_pareto_params)
         logging.info(("Finished processing all {0:g} possible transmission expansion plans: "

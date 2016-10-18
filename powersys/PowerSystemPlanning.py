@@ -1,6 +1,7 @@
 """Power system planning classes"""
 from PowerSystemScenario import PowerSystemScenario
 import pandas as pd
+import itertools
 
 
 class CandidateTransmissionLine(object):
@@ -22,6 +23,13 @@ class CandidateTransmissionLine(object):
                                                        row['investment_cost'])
             candidate_lines.append(candidate_line)
         return candidate_lines
+
+    def is_equivalent(self, other_candidate):
+        """Determines whether two candidate transmission lines are equivalent
+        (despite being modeled as two alternative candidate lines)"""
+        # type: (CandidateTransmissionLine) -> bool
+        return self.transmission_line.is_equivalent(other_candidate.transmission_line) \
+               and self.investment_cost == other_candidate.investment_cost
 
     def __str__(self):
         return str(self.transmission_line)
@@ -52,6 +60,38 @@ class PowerSystemTransmissionPlanning(object):
     def transmission_line_is_candidate(self, transmission_line):
         return transmission_line in (candidate.transmission_line
                                      for candidate in self.candidate_lines)
+
+    @staticmethod
+    def get_sets_of_equivalent_lines_idx(candidates_lines):
+        # type: (List[CandidateTransmissionLine]) -> List[List[CandidateTransmissionLine]]
+        n = len(candidates_lines)
+        equivalent_lines_idx = []
+        for i in range(n):
+            candidate1 = candidates_lines[i]  # type: CandidateTransmissionLine
+            equivalent_lines_to_c1_idx = [i]
+            for j in range(i, n):
+                candidate2 = candidates_lines[j]  # type: CandidateTransmissionLine
+                if candidate1.is_equivalent(candidate2):
+                    equivalent_lines_to_c1_idx.append(j)
+            if len(equivalent_lines_to_c1_idx) > 1:
+                equivalent_lines_idx.append(equivalent_lines_to_c1_idx)
+        return equivalent_lines_idx
+
+    @staticmethod
+    def get_sets_of_equivalent_lines(candidates_lines):
+        # type: (List[CandidateTransmissionLine]) -> List[List[CandidateTransmissionLine]]
+        n = len(candidates_lines)
+        equivalent_lines = []
+        for i in range(n):
+            candidate1 = candidates_lines[i]  # type: CandidateTransmissionLine
+            equivalent_lines_to_c1 = []
+            for j in range(i, n):
+                candidate2 = candidates_lines[j]  # type: CandidateTransmissionLine
+                if candidate1.is_equivalent(candidate2):
+                    equivalent_lines_to_c1.append(candidate2)
+            if len(equivalent_lines_to_c1) > 0:
+                equivalent_lines.append(equivalent_lines_to_c1)
+        return equivalent_lines
 
     @staticmethod
     def import_from_excel(excel_filepath):

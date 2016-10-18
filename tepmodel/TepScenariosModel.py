@@ -84,6 +84,28 @@ class StaticTePlan(object):
                                                                        plan_id))
         return plan
 
+    @staticmethod
+    def is_first_unique_by_id(plan_id, equivalent_lines_idx):
+        for equivalent_lines_idx_group in equivalent_lines_idx:
+            for i in range(1, len(equivalent_lines_idx_group)):
+                idx = equivalent_lines_idx_group[i]
+                idx_prev = equivalent_lines_idx_group[i - 1]
+                if (plan_id >> idx) & 1 and not (plan_id >> idx_prev) & 1:
+                    # the line in idx is active, but the previous (and equivalent) line is not active
+                    # hence another equivalent plan has lower id
+                    # and thus it was already processed by an exhaustive enumerator
+                    return False
+        return True
+
+    @staticmethod
+    def is_first_unique(candidate_lines_built, equivalent_lines):
+        for equivalent_lines_group in equivalent_lines:
+            for i in range(1, len(equivalent_lines_group)):
+                if equivalent_lines_group[i] in candidate_lines_built \
+                        and equivalent_lines_group[i - 1] not in candidate_lines_built:
+                    return False
+        return True
+
     def get_plan_id(self):
         return Utils.subset_to_id(self.tep_model.tep_system.candidate_lines, self.candidate_lines_built)
 
@@ -263,7 +285,8 @@ class ScenariosTepParetoFrontByBruteForce(object):
             self.extra_alternatives = []  # type: list[StaticTePlan]
         self.efficient_alternatives = []  # type: list[StaticTePlan]
         # enumerate and evaluate all possible alternatives
-        self.number_of_possible_plans = self.tep_model.get_numberof_possible_expansion_plans()
+        self.number_of_maximum_possible_plans = self.tep_model.get_numberof_possible_expansion_plans()
+        self.number_of_processed_plans = 0
         self.best_plan_scenario = collections.OrderedDict()
         for scenario in self.tep_model.tep_system.scenarios:
             self.best_plan_scenario[scenario] = None
@@ -273,7 +296,11 @@ class ScenariosTepParetoFrontByBruteForce(object):
         self.elapsed_seconds = self.stop_time - self.start_clock
 
     def eval_all_alternatives(self):
-        for plan_id in range(self.number_of_possible_plans):
+        equivalent_lines_idx = pwsp.PowerSystemTransmissionPlanning.get_sets_of_equivalent_lines_idx(
+            self.tep_model.tep_system.candidate_lines)
+        iterator_plan_ids = (i for i in range(self.number_of_maximum_possible_plans)
+                             if StaticTePlan.is_first_unique_by_id(i, equivalent_lines_idx))
+        for plan_id in iterator_plan_ids:
             # build and solve plan
             alternative = StaticTePlan.from_id(self.tep_model, plan_id)
             # update set of efficient plans with the newly created plan
@@ -283,12 +310,14 @@ class ScenariosTepParetoFrontByBruteForce(object):
                     and self.pareto_brute_force_params.save_alternative(self, alternative):
                 self.extra_alternatives.append(alternative)
             # report progress
-            if (plan_id % self.pareto_brute_force_params.plans_processed_for_reporting) == 0:
+            self.number_of_processed_plans += 1
+            if (self.number_of_processed_plans % self.pareto_brute_force_params.plans_processed_for_reporting) == 0:
                 elapsed_time = time.clock() - self.start_clock
-                logging.info(("Processed {0} / {1} alternatives "
-                              "(elapsed: {2})...").format(plan_id, self.number_of_possible_plans,
-                                                          str(timedelta(seconds=elapsed_time))
-                                                          )
+                logging.info("Processed {0} alternatives (elapsed: {3}; current ID={1} / {2})...".
+                             format(self.number_of_processed_plans,
+                                    plan_id, self.number_of_maximum_possible_plans,
+                                    str(timedelta(seconds=elapsed_time))
+                                    )
                              )
 
     def update_set_of_efficient_plans(self, alternative):
@@ -409,11 +438,18 @@ class ScenariosTepParetoFrontByBruteForceSummary(object):
         self.df_extra_alternatives = None
         if pareto_brute.pareto_brute_force_params.save_extra_alternatives:
             list_summaries_extra_alternatives = []
-            for alternative in pareto_brute.extra_alternatives:
+            logging.info("Proceeding to summarize {} extra alternatives".format(len(pareto_brute.extra_alternatives)))
+            startsumm = time.clock()
+            for idx, alternative in enumerate(pareto_brute.extra_alternatives):
                 summary = StaticTePlanDetails(alternative).plan_summary
                 summary['Kind'] = 'Efficient' if alternative in pareto_brute.efficient_alternatives else 'Dominated'
                 summary = pd.DataFrame(summary, index=['Plan{0}'.format(summary['Plan ID'])])
                 list_summaries_extra_alternatives.append(summary)
+                if idx % 100 == 0:
+                    elapsed_secs = time.clock() - startsumm
+                    logging.info("Summarized {} / {} extra alternatives (elapsed: {})".
+                                 format(idx, len(pareto_brute.extra_alternatives), timedelta(seconds=elapsed_secs))
+                                 )
             self.df_extra_alternatives = pd.concat(list_summaries_extra_alternatives)
 
     def summarize_efficient_alternatives(self, efficient_alternatives):

@@ -72,5 +72,11 @@ class TransmissionLine(PowerSystemElement):
         self.susceptance = susceptance
         self.thermal_capacity = thermal_capacity
 
+    def is_equivalent(self, other_line):
+        # type: (TransmissionLine) -> bool
+        return self.node_from == other_line.node_from and self.node_to == other_line.node_to \
+               and self.thermal_capacity == other_line.thermal_capacity \
+               and self.susceptance == other_line.susceptance
+
     def __str__(self):
         return self.name + "({}-{})".format(self.node_from.name, self.node_to.name)

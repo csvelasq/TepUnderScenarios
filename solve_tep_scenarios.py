@@ -3,6 +3,8 @@ import tepmodel as tep
 import Utils
 import logging
 import time
+from datetime import timedelta
+import pandas as pd
 
 # Debug messages go to console and to log_tep_MMDDYYYY.log
 logFileName = 'logs\log_tep_' + time.strftime("%m%d%Y") + '.log'
@@ -32,6 +34,7 @@ class TepSolverApp(object):
         self.tep_model = self.open_new_tep_model_instance()
         self.tep_pareto_brute_solver = None
         self.tep_pareto_brute_solver_summary = None
+        self.robustness_calculator = None
         logging.info("Successfully opened case '{0}' from path '{1}'".format(self.tep_case_name, self.workspace_dir))
 
     def from_relative_to_abs_path(self, relpath):
@@ -63,40 +66,65 @@ class TepSolverApp(object):
 
     def set_current_testcase_instance(self, instance_name=None):
         self.instance_name = instance_name
-        if self.instance_name is None:
+        if self.instance_name is None or self.instance_name == "":
             self.instance_name = self.tep_case_name + "_DefaultCase"
         self.instance_folder = self.from_relative_to_abs_path(self.instance_name)
         if not os.path.isdir(self.instance_folder):
             os.mkdir(self.instance_folder)
 
+    def open_pareto_front(self, instance_name=None, suffix="_fullpareto.xlsx"):
+        self.set_current_testcase_instance(instance_name)
+        self.pareto_excel_filename = self.from_relative_to_abs_path_instance(self.instance_name + suffix)
+        df_pareto = pd.read_excel(self.pareto_excel_filename, sheetname="ParetoAlternatives")
+        self.efficient_alternatives = []
+        for index, row in df_pareto.iterrows():
+            plan_id = row['Plan ID']
+            plan = tep.StaticTePlan.from_id(self.tep_model, plan_id)
+            self.efficient_alternatives.append(plan)
+
     def build_pareto_front_by_brute_force(self, save_to_excel=False, plot_front=False,
                                           save_all=True):
-        logging.info(("Beginning construction of pareto front by brute-force, "
-                      "enumerating all {0} possible "
-                      "transmission expansion plans").format(self.tep_model.get_numberof_possible_expansion_plans()))
+        # Initialize
+        logging.info(("Beginning construction of pareto front by brute-force, enumerating all {0} possible "
+                      "transmission expansion plans (some redundant plans may be discarded)").
+                     format(self.tep_model.get_numberof_possible_expansion_plans()))
         if save_all:
-            prob_record = 0.1
-            max_alts_record = 200
-            my_pareto_params = tep.ScenariosTepParetoFrontByBruteForceParams(
-                save_extra_alternatives=save_all,
-                save_alternative_handle=tep.ScenariosTepParetoFrontByBruteForceParams.save_maxrandom_alternatives,
-                save_alternative_handle_params=[prob_record, max_alts_record],
-                plans_processed_for_reporting=1000,
-            )
-            logging.info("At most {} alternatives will be chosen at random (p={:1%}) for recording extra alternatives".
-                         format(max_alts_record, prob_record))
+            opt = 'all'
+            if opt == 'all':
+                my_pareto_params = tep.ScenariosTepParetoFrontByBruteForceParams(
+                    save_extra_alternatives=save_all,
+                    save_alternative_handle=tep.ScenariosTepParetoFrontByBruteForceParams.save_all_alternatives,
+                    save_alternative_handle_params=None,
+                    plans_processed_for_reporting=500,
+                )
+                logging.info("All (unique) processed transmission expansion alternatives will be recorded")
+            elif opt == 'random':
+                prob_record = 0.1
+                max_alts_record = 200
+                my_pareto_params = tep.ScenariosTepParetoFrontByBruteForceParams(
+                    save_extra_alternatives=save_all,
+                    save_alternative_handle=tep.ScenariosTepParetoFrontByBruteForceParams.save_maxrandom_alternatives,
+                    save_alternative_handle_params=[prob_record, max_alts_record],
+                    plans_processed_for_reporting=1000,
+                )
+                logging.info(
+                    "At most {} alternatives will be chosen at random (p={:1%}) for recording extra alternatives".
+                        format(max_alts_record, prob_record))
         else:
             my_pareto_params = tep.ScenariosTepParetoFrontByBruteForceParams(
                 save_extra_alternatives=save_all, plans_processed_for_reporting=1000)
+        # Solve
         self.tep_pareto_brute_solver = tep.ScenariosTepParetoFrontByBruteForce(self.tep_model,
                                                                                pareto_brute_force_params=my_pareto_params)
-        logging.info(("Finished processing all {0:g} possible transmission expansion plans: "
-                      "{1} efficient "
-                      "transmission expansion alternatives. "
+        self.efficient_alternatives = self.tep_pareto_brute_solver.efficient_alternatives
+        logging.info(("Finished processing all {0:g} possible (unique) transmission expansion plans (elapsed: {2}): "
+                      "{1} efficient transmission expansion alternatives found. "
                       "Now building summary of solution...").
-                     format(self.tep_pareto_brute_solver.number_of_possible_plans,
-                            len(self.tep_pareto_brute_solver.efficient_alternatives))
+                     format(self.tep_pareto_brute_solver.number_of_processed_plans,
+                            len(self.tep_pareto_brute_solver.efficient_alternatives),
+                            str(timedelta(seconds=self.tep_pareto_brute_solver.elapsed_seconds)))
                      )
+        # Summarizing
         self.tep_pareto_brute_solver_summary = tep.ScenariosTepParetoFrontByBruteForceSummary(
             self.tep_pareto_brute_solver)
         if save_to_excel:
@@ -109,14 +137,11 @@ class TepSolverApp(object):
         return self.tep_pareto_brute_solver_summary
 
     def save_exact_pareto_front_to_excel(self, open_upon_completion=True):
-        self.pareto_excel_filename = self.from_relative_to_abs_path_instance(self.instance_name + "_fullpareto.xlsx")
-        saved_successfully = Utils.try_save_file(self.pareto_excel_filename,
-                                                 self.tep_pareto_brute_solver_summary.to_excel)
-        if not saved_successfully:
-            print "Pareto-front results were not written to file '{0}'".format(self.pareto_excel_filename)
-        else:
-            if open_upon_completion:
-                os.system('start excel.exe "%s"' % (self.pareto_excel_filename,))
+        r = self.save_to_excel(self.tep_pareto_brute_solver_summary.to_excel,
+                               self.instance_name + "_fullpareto.xlsx",
+                               open_upon_completion)
+        if r:
+            self.pareto_excel_filename = r  # If succesful, method returns the filename
             msg = "Save detailed solution for all {} efficient alternatives (y/n):".format(
                 len(self.tep_pareto_brute_solver.efficient_alternatives))
             save_details_efficient = Utils.get_yesno_answer_console(message=msg, default_answer=True)
@@ -131,6 +156,17 @@ class TepSolverApp(object):
                         logging.info(
                             "Details for plan {} were not saved".format(eff_alt_details.plan_summary['Plan ID']))
 
+    def save_to_excel(self, to_excel_func, filename, open_upon_completion=True):
+        my_filename = self.from_relative_to_abs_path_instance(filename)
+        saved_successfully = Utils.try_save_file(my_filename, to_excel_func)
+        if not saved_successfully:
+            print "Results were not written to file '{0}'".format(my_filename)
+            return False
+        else:
+            if open_upon_completion:
+                os.system('start excel.exe "%s"' % (my_filename,))
+            return my_filename
+
     def plot_exact_pareto_front(self):
         self.pareto_plot_filename = self.from_relative_to_abs_path_instance(self.instance_name + "_fullpareto.html")
         scen_num = len(self.tep_model.tep_system.scenarios)
@@ -139,6 +175,11 @@ class TepSolverApp(object):
                 scen_num)
         else:
             self.tep_pareto_brute_solver.plot_alternatives(self.pareto_plot_filename)
+
+    def calculate_robustness_measure(self):
+        self.robustness_calculator = tep.SecondOrderRobustnessMeasureCalculator(self.efficient_alternatives)
+        self.save_to_excel(self.robustness_calculator.to_excel,
+                           self.instance_name + "_RobustnessMeasure.xlsx", True)
 
     def inspect_transmission_plan(self, plan_id):
         """
@@ -177,14 +218,28 @@ if __name__ == '__main__':
     my_tep_app = TepSolverApp.open_workspace(
         os.path.join(default_workspace_master_path, default_case))  # type: TepSolverApp
 
-    build_pareto = Utils.get_yesno_answer_console(message='Build pareto front (y/n):', default_answer=True)
-    if build_pareto:
-        save_all_alternatives = Utils.get_yesno_answer_console(
-            message='Save all alternatives (including dominated alternatives) (y/n)?', default_answer=False)
-        print 'Building pareto front by brute force, saving results to excel and plotting (if possible)...'
-        my_tep_app.build_pareto_front_by_brute_force(save_to_excel=True, plot_front=True,
-                                                     save_all=save_all_alternatives)
-        print 'Ok'
+    open_pareto = Utils.get_yesno_answer_console(message='Open pareto front (y/n):', default_answer=True)
+    if open_pareto:
+        instance_name = raw_input('Instance name for saved pareto front [blank for default]: ')
+        my_tep_app.open_pareto_front(instance_name)
+    else:
+        build_pareto = Utils.get_yesno_answer_console(message='Build pareto front (y/n):', default_answer=True)
+        if build_pareto:
+            save_all_alternatives = Utils.get_yesno_answer_console(
+                message='Save extra alternatives (including dominated alternatives) (y/n)?', default_answer=False)
+            print 'Building pareto front by brute force...'
+            my_tep_app.build_pareto_front_by_brute_force(save_to_excel=True, plot_front=True,
+                                                         save_all=save_all_alternatives)
+            print 'Ok'
+
+    # If there is a pareto front built, ask whether robustness of efficient alternatives should be calculated
+    if my_tep_app.efficient_alternatives is not None:
+        calculate_robustness = Utils.get_yesno_answer_console(
+            message='Calculate robustness of efficient alternatives? (y/n):', default_answer=True)
+        if calculate_robustness:
+            print 'Calculating robustness of efficient alternatives by means of convex hull...'
+            my_tep_app.calculate_robustness_measure()
+            print 'Ok'
 
     plan_id_input = raw_input("Provide the ID of a plan to inspect, or 'q' to quit: ")
     while plan_id_input != 'q':

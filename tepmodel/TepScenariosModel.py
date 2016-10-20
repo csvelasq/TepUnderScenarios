@@ -77,6 +77,14 @@ class StaticTePlan(object):
         [self.scenario_simulation_model, self.total_costs, self.operation_costs] = self.tep_model.evaluate_plan(self)
 
     @staticmethod
+    def from_binary_gene(tep_model, candidate_lines_binary_gene):
+        # type: (TepScenariosModel, List) -> StaticTePlan
+        return StaticTePlan(tep_model,
+                            [tep_model.tep_system.candidate_lines[i]
+                             for i in range(len(candidate_lines_binary_gene))
+                             if candidate_lines_binary_gene[i]])
+
+    @staticmethod
     def from_id(tep_model, plan_id):
         # type: (TepScenariosModel, int) -> StaticTePlan
         plan = StaticTePlan(tep_model,
@@ -147,10 +155,6 @@ class StaticTePlan(object):
             plan_summary['Total Costs {0} [MMUS$]'.format(scenario.name)] = self.total_costs[scenario]
         return plan_summary
 
-    def get_lightweight_plan_summary(self):
-        # type: () -> StaticTePlanLightSummary
-        return StaticTePlanLightSummary(self)
-
     def regret(self, optimal_plan, scenario):
         """Calculates the regret of this expansion plan in a given scenario, provided the optimal plan for that scenario
 
@@ -206,15 +210,6 @@ class StaticTePlanDetails(object):
         sheetname_summary = 'Plan {0}'.format(self.plan_summary['Plan ID'])
         Utils.df_to_excel_sheet_autoformat(self.plan_df_summary, writer, sheetname_summary)
         self.scenarios_results.to_excel_sheets(writer, recursive=True)
-
-
-class StaticTePlanLightSummary(object):
-    """A lightweight summary of a transmission expansion plan, for plotting thousands of possible alternatives"""
-
-    def __init__(self, plan):
-        # type: (StaticTePlan) -> object
-        self.total_costs = plan.total_costs
-        self.plan_id = plan.get_plan_id()
 
 
 class ScenariosTepParetoFrontByBruteForceParams(object):
@@ -276,26 +271,147 @@ class ScenariosTepParetoFrontByBruteForceParams(object):
         return True
 
 
-class ScenariosTepParetoFrontByBruteForce(object):
-    def __init__(self, tep_model, pareto_brute_force_params=ScenariosTepParetoFrontByBruteForceParams()):
-        # type: (TepScenariosModel, ScenariosTepParetoFrontByBruteForceParams) -> None
+class ScenariosTepParetoFrontBuilder(object):
+    def __init__(self, tep_model):
+        # type: (TepScenariosModel) -> None
         self.tep_model = tep_model
+        # Plans in pareto front, set by function 'build_pareto_front'
+        self.efficient_alternatives = []  # type: list[StaticTePlan]
+        # Optimal plan for each scenario, set by function 'build_pareto_front'
+        self.optimal_plans = collections.OrderedDict()
+        for scenario in self.tep_model.tep_system.scenarios:
+            self.optimal_plans[scenario] = None
+        # Summary: these are filled in the function 'summarize',
+        # which must be called upon completion of 'build_pareto_front' by implementing classes
+        self.start_time = None
+        self.elapsed_seconds = None
+        self.summary_pareto_front = collections.OrderedDict()
+        self.df_summary_pareto_front = None
+        self.minimax_cost = float('inf')
+        self.minimax_cost_plan = None
+        self.minimax_regret = float('inf')
+        self.minimax_regret_plan = None
+        self.df_efficient_alternatives = None  # set by function 'summarize_efficient_alternatives'
+
+    def execute_build_pareto_front(self, save_to_excel=False, excel_filename=''):
+        self.start_time = time.clock()
+        self.build_pareto_front()
+        self.elapsed_seconds = time.clock() - self.start_time
+        logging.info("Finished building pareto front, proceeding to summarize results..")
+        self.summarize()
+        if save_to_excel:
+            self.to_excel(excel_filename)
+
+    def build_pareto_front(self):
+        # type: () -> List[StaticTePlan]
+        pass
+
+    def summarize(self):
+        self.summary_pareto_front['Elapsed time'] = str(timedelta(seconds=self.elapsed_seconds))
+        self.summary_pareto_front['Number of Efficient Alternatives'] = len(self.efficient_alternatives)
+        for scenario in self.tep_model.tep_system.scenarios:
+            self.summary_pareto_front['Optimal Plan {}'.format(scenario.name)] = str(self.optimal_plans[scenario])
+            self.summary_pareto_front['Optimal Cost {}'.format(scenario.name)] = \
+                self.optimal_plans[scenario].total_costs[scenario]
+        # Process and summarize efficient alternatives
+        self.summarize_efficient_alternatives()
+        self.summary_pareto_front['Minimax Cost Plan'] = str(self.minimax_cost_plan)
+        self.summary_pareto_front['Minimax Cost'] = self.minimax_cost
+        self.summary_pareto_front['Minimax Regret Plan'] = str(self.minimax_regret_plan)
+        self.summary_pareto_front['Minimax Regret'] = self.minimax_regret
+        self.df_summary_pareto_front = pd.DataFrame(self.summary_pareto_front, index=['Value']).transpose()
+
+    def summarize_efficient_alternatives(self):
+        # type: (List[StaticTePlan], List[StaticTePlan], float, bool) -> object
+        # TODO save details for each plan in the pareto solver, do not construct details again (it's idiotic)
+        list_summaries_alternatives = []
+        for alternative in self.efficient_alternatives:
+            summary = StaticTePlanDetails(alternative).plan_summary
+            summary['Kind'] = 'Efficient'  # if alternative in efficient_alternatives else 'Dominated'
+            summary = pd.DataFrame(summary, index=['Plan{0}'.format(summary['Plan ID'])])
+            list_summaries_alternatives.append(summary)
+            # updates minimax cost
+            max_cost_this_alternative = max(alternative.total_costs.values())
+            if max_cost_this_alternative < self.minimax_cost:
+                self.minimax_cost = max_cost_this_alternative
+                self.minimax_cost_plan = alternative
+            # updates minimax regret
+            max_regret_this_alternative = alternative.max_regret(self.optimal_plans)
+            if max_regret_this_alternative < self.minimax_regret:
+                self.minimax_regret = max_regret_this_alternative
+                self.minimax_regret_plan = alternative
+        self.df_efficient_alternatives = pd.concat(list_summaries_alternatives)
+
+    def to_excel(self, excel_filename, sheetname=['ParetoAlternatives', 'ParetoSummary']):
+        writer = pd.ExcelWriter(excel_filename, engine='xlsxwriter')
+        self.to_excel_sheet(writer, sheetname=sheetname)
+        writer.save()
+
+    def to_excel_sheet(self, writer, sheetname=['ParetoAlternatives', 'ParetoSummary']):
+        Utils.df_to_excel_sheet_autoformat(self.df_summary_pareto_front, writer, sheetname[1])
+        Utils.df_to_excel_sheet_autoformat(self.df_efficient_alternatives, writer, sheetname[0])
+
+    @staticmethod
+    def alternatives_to_plot_list(s1, s2, alternatives):
+        x = list(alternative.total_costs[s1]
+                 for alternative in alternatives)
+        y = list(alternative.total_costs[s2]
+                 for alternative in alternatives)
+        tags = list(alternative.get_plan_id()
+                    for alternative in alternatives)
+        return [x, y, tags]
+
+    def build_plot_alternatives(self):
+        assert len(self.tep_model.tep_system.scenarios) == 2
+        first_scenario = self.tep_model.tep_system.scenarios[0]
+        second_scenario = self.tep_model.tep_system.scenarios[1]
+        # plot efficient alternatives with frontier
+        efficient_alts = sorted(self.efficient_alternatives, key=lambda a: a.total_costs[first_scenario])
+        [x_efficient, y_efficient, tags_efficient] = ScenariosTepParetoFrontBuilder.alternatives_to_plot_list(
+            first_scenario, second_scenario,
+            efficient_alts)
+        trace_efficient = Scatter(x=x_efficient,
+                                  y=y_efficient,
+                                  name='Efficient',
+                                  mode='lines+markers',
+                                  marker=dict(size=10),
+                                  text=tags_efficient)
+        self.data_plotly = [trace_efficient]
+        # render plot
+        show_grid_lines = True
+        self.plot_layout = Layout(
+            title="Pareto Front for TEP under Scenarios",
+            hovermode='closest',
+            xaxis=dict(
+                title='Total Cost Scenario 1',
+                showgrid=show_grid_lines
+            ),
+            yaxis=dict(
+                title='Total Cost Scenario 2',
+                showgrid=show_grid_lines
+            )
+        )
+
+    def plot_alternatives_offline(self, filename):
+        plotly.offline.plot({"data": self.data_plotly,
+                             "layout": self.plot_layout},
+                            filename=filename)
+
+
+class ScenariosTepParetoFrontByBruteForce(ScenariosTepParetoFrontBuilder):
+    def __init__(self, tep_model,
+                 pareto_brute_force_params=ScenariosTepParetoFrontByBruteForceParams()):
+        # type: (TepScenariosModel, ScenariosTepParetoFrontByBruteForceParams) -> None
+        ScenariosTepParetoFrontBuilder.__init__(self, tep_model)
         self.pareto_brute_force_params = pareto_brute_force_params
         if self.pareto_brute_force_params.save_extra_alternatives:
             self.extra_alternatives = []  # type: list[StaticTePlan]
-        self.efficient_alternatives = []  # type: list[StaticTePlan]
         # enumerate and evaluate all possible alternatives
         self.number_of_maximum_possible_plans = self.tep_model.get_numberof_possible_expansion_plans()
         self.number_of_processed_plans = 0
-        self.best_plan_scenario = collections.OrderedDict()
-        for scenario in self.tep_model.tep_system.scenarios:
-            self.best_plan_scenario[scenario] = None
-        self.start_clock = time.clock()
-        self.eval_all_alternatives()
-        self.stop_time = time.clock()
-        self.elapsed_seconds = self.stop_time - self.start_clock
 
-    def eval_all_alternatives(self):
+    def build_pareto_front(self):
+        # type: () -> List[StaticTePlan]
         equivalent_lines_idx = pwsp.PowerSystemTransmissionPlanning.get_sets_of_equivalent_lines_idx(
             self.tep_model.tep_system.candidate_lines)
         iterator_plan_ids = (i for i in range(self.number_of_maximum_possible_plans)
@@ -319,6 +435,7 @@ class ScenariosTepParetoFrontByBruteForce(object):
                                     str(timedelta(seconds=elapsed_time))
                                     )
                              )
+        return self.efficient_alternatives
 
     def update_set_of_efficient_plans(self, alternative):
         dominated_to_remove = []
@@ -335,112 +452,22 @@ class ScenariosTepParetoFrontByBruteForce(object):
             self.efficient_alternatives.append(alternative)
             # update best plan for each scenario
             for scenario in self.tep_model.tep_system.scenarios:
-                if self.best_plan_scenario[scenario] is None \
-                        or alternative.total_costs[scenario] < self.best_plan_scenario[scenario].total_costs[scenario]:
-                    self.best_plan_scenario[scenario] = alternative
+                if self.optimal_plans[scenario] is None \
+                        or alternative.total_costs[scenario] < self.optimal_plans[scenario].total_costs[scenario]:
+                    self.optimal_plans[scenario] = alternative
 
     def get_dominated_alternatives(self):
         return (alt for alt in self.extra_alternatives if alt not in self.efficient_alternatives)
 
-    def plot_alternatives(self, filename):
-        def alternatives_to_plot_list(s1, s2, alternatives):
-            x = list(alternative.total_costs[s1]
-                     for alternative in alternatives)
-            y = list(alternative.total_costs[s2]
-                     for alternative in alternatives)
-            tags = list(alternative.get_plan_id()
-                        for alternative in alternatives)
-            return [x, y, tags]
-
-        assert len(self.tep_model.tep_system.scenarios) == 2
-        first_scenario = self.tep_model.tep_system.scenarios[0]
-        second_scenario = self.tep_model.tep_system.scenarios[1]
-        # plot efficient alternatives and frontier
-        efficient_alts = sorted(self.efficient_alternatives, key=lambda a: a.total_costs[first_scenario])
-        [x_efficient, y_efficient, tags_efficient] = alternatives_to_plot_list(first_scenario, second_scenario,
-                                                                               efficient_alts)
-        trace_efficient = Scatter(
-            x=x_efficient,
-            y=y_efficient,
-            name='Efficient',
-            mode='lines+markers',
-            marker=dict(
-                size=10
-            ),
-            text=tags_efficient
-        )
-        data_plotly = [trace_efficient]
-        # plot dominated alternatives, if all alternatives were recorded
-        if self.pareto_brute_force_params.save_extra_alternatives:
-            dominated_alternatives = list(self.get_dominated_alternatives())
-            [x_dominated, y_dominated, tags_dominated] = alternatives_to_plot_list(first_scenario, second_scenario,
-                                                                                   dominated_alternatives)
-            trace_dominated = Scatter(
-                x=x_dominated,
-                y=y_dominated,
-                mode='markers',
-                name='Dominated',
-                marker=dict(
-                    size=5,
-                    color='rgb(200,200,200)'
-                ),
-                text=tags_dominated
-            )
-            data_plotly.append(trace_dominated)
-        # render plot
-        show_grid_lines = True
-        plot_layout = Layout(
-            title="Pareto Front for TEP under Scenarios",
-            hovermode='closest',
-            xaxis=dict(
-                title='Total Cost Scenario 1',
-                showgrid=show_grid_lines
-            ),
-            yaxis=dict(
-                title='Total Cost Scenario 2',
-                showgrid=show_grid_lines
-            )
-        )
-        plotly.offline.plot({
-            "data": data_plotly,
-            "layout": plot_layout
-        },
-            filename=filename)
-
-
-class ScenariosTepParetoFrontByBruteForceSummary(object):
-    """Summarizes results of a TEP pareto front"""
-
-    def __init__(self, pareto_brute):
-        # type: (ScenariosTepParetoFrontByBruteForce) -> None
-        self.summary_pareto_front = collections.OrderedDict()
-        self.summary_pareto_front['Elapsed time'] = str(timedelta(seconds=pareto_brute.elapsed_seconds))
-        self.summary_pareto_front['Number of Efficient Alternatives'] = len(pareto_brute.efficient_alternatives)
-        self.optimal_plans = collections.OrderedDict()
-        for scenario in pareto_brute.tep_model.tep_system.scenarios:
-            self.optimal_plans[scenario] = pareto_brute.best_plan_scenario[scenario]
-            self.summary_pareto_front['Optimal Plan {}'.format(scenario.name)] = str(self.optimal_plans[scenario])
-            self.summary_pareto_front['Optimal Cost {}'.format(scenario.name)] = \
-                self.optimal_plans[scenario].total_costs[scenario]
-        # Process and summarize efficient alternatives
-        self.minimax_cost = float('inf')
-        self.minimax_cost_plan = None
-        self.minimax_regret = float('inf')
-        self.minimax_regret_plan = None
-        self.df_efficient_alternatives = None
-        self.summarize_efficient_alternatives(pareto_brute.efficient_alternatives)
-        self.summary_pareto_front['Minimax Cost Plan'] = str(self.minimax_cost_plan)
-        self.summary_pareto_front['Minimax Cost'] = self.minimax_cost
-        self.summary_pareto_front['Minimax Regret Plan'] = str(self.minimax_regret_plan)
-        self.summary_pareto_front['Minimax Regret'] = self.minimax_regret
-        self.df_summary_pareto_front = pd.DataFrame(self.summary_pareto_front, index=['Value']).transpose()
+    def summarize(self):
+        ScenariosTepParetoFrontBuilder.summarize(self)
         # Summarize extra alternatives
         self.df_extra_alternatives = None
-        if pareto_brute.pareto_brute_force_params.save_extra_alternatives:
+        if self.pareto_brute_force_params.save_extra_alternatives:
             list_summaries_extra_alternatives = []
-            logging.info("Proceeding to summarize {} extra alternatives".format(len(pareto_brute.extra_alternatives)))
+            logging.info("Proceeding to summarize {} extra alternatives".format(len(self.extra_alternatives)))
             startsumm = time.clock()
-            for idx, alternative in enumerate(pareto_brute.extra_alternatives):
+            for idx, alternative in enumerate(self.extra_alternatives):
                 summary = StaticTePlanDetails(alternative).plan_summary
                 summary['Kind'] = 'Efficient' if alternative in pareto_brute.efficient_alternatives else 'Dominated'
                 summary = pd.DataFrame(summary, index=['Plan{0}'.format(summary['Plan ID'])])
@@ -452,35 +479,24 @@ class ScenariosTepParetoFrontByBruteForceSummary(object):
                                  )
             self.df_extra_alternatives = pd.concat(list_summaries_extra_alternatives)
 
-    def summarize_efficient_alternatives(self, efficient_alternatives):
-        # type: (List[StaticTePlan], List[StaticTePlan], float, bool) -> object
-        # TODO save details for each plan in the pareto solver, do not construct details again (it's idiotic)
-        list_summaries_alternatives = []
-        for alternative in efficient_alternatives:
-            summary = StaticTePlanDetails(alternative).plan_summary
-            summary['Kind'] = 'Efficient'  # if alternative in efficient_alternatives else 'Dominated'
-            summary = pd.DataFrame(summary, index=['Plan{0}'.format(summary['Plan ID'])])
-            list_summaries_alternatives.append(summary)
-            # updates minimax cost
-            max_cost_this_alternative = max(alternative.total_costs.values())
-            if max_cost_this_alternative < self.minimax_cost:
-                self.minimax_cost = max_cost_this_alternative
-                self.minimax_cost_plan = alternative
-            # updates minimax regret
-            max_regret_this_alternative = alternative.max_regret(self.optimal_plans)
-            if max_regret_this_alternative < self.minimax_regret:
-                self.minimax_regret = max_regret_this_alternative
-                self.minimax_regret_plan = alternative
-        self.df_efficient_alternatives = pd.concat(list_summaries_alternatives)
-
-    def to_excel(self, excel_filename, sheetname=['ParetoAlternatives', 'ParetoSummary', 'ExtraAlternatives']):
-        # TODO save detailed solution excel for all efficient alternatives
-        writer = pd.ExcelWriter(excel_filename, engine='xlsxwriter')
-        self.to_excel_sheet(writer, sheetname=sheetname)
-        writer.save()
-
-    def to_excel_sheet(self, writer, sheetname=['ParetoAlternatives', 'ParetoSummary', 'ExtraAlternatives']):
-        Utils.df_to_excel_sheet_autoformat(self.df_summary_pareto_front, writer, sheetname[1])
-        Utils.df_to_excel_sheet_autoformat(self.df_efficient_alternatives, writer, sheetname[0])
+    def to_excel_sheet(self, writer, sheetname=['ParetoAlternatives', 'ParetoSummary', 'DominatedAlternatives']):
+        ScenariosTepParetoFrontBuilder.to_excel_sheet(writer, sheetname[0:1])
         if self.df_extra_alternatives is not None:
             Utils.df_to_excel_sheet_autoformat(self.df_extra_alternatives, writer, sheetname[2])
+
+    def build_plot_alternatives(self):
+        ScenariosTepParetoFrontBuilder.build_plot_alternatives(self)
+        # plot dominated alternatives, if all alternatives were recorded
+        if self.pareto_brute_force_params.save_extra_alternatives:
+            first_scenario = self.tep_model.tep_system.scenarios[0]
+            second_scenario = self.tep_model.tep_system.scenarios[1]
+            dominated_alternatives = list(self.get_dominated_alternatives())
+            [x_dominated, y_dominated, tags_dominated] = ScenariosTepParetoFrontBuilder.alternatives_to_plot_list(
+                first_scenario, second_scenario, dominated_alternatives)
+            trace_dominated = Scatter(x=x_dominated,
+                                      y=y_dominated,
+                                      mode='markers',
+                                      name='Dominated',
+                                      marker=dict(size=3, color='rgb(200,200,200)'),
+                                      text=tags_dominated)
+            self.data_plotly.append(trace_dominated)

@@ -212,65 +212,6 @@ class StaticTePlanDetails(object):
         self.scenarios_results.to_excel_sheets(writer, recursive=True)
 
 
-class ScenariosTepParetoFrontByBruteForceParams(object):
-    def __init__(self, save_extra_alternatives=False,
-                 save_alternative_handle=None, save_alternative_handle_params=None,
-                 plans_processed_for_reporting=None):
-        # type: (bool, object, object, int) -> None
-        """Parameters for brute-force construction of pareto front
-
-        :param save_extra_alternatives: True if all alternatives are to be saved, following some filtering criteria
-        :param save_alternative_handle: Function handle to filter which alternatives to save
-        :param save_alternative_handle_params: Parameters for the filtering function
-        :param plans_processed_for_reporting: Number of plans that must be processed before reporting progress
-        """
-        self.save_extra_alternatives = save_extra_alternatives
-        self.save_alternative_handle = save_alternative_handle
-        self.save_alternative_handle_params = save_alternative_handle_params
-        self.plans_processed_for_reporting = plans_processed_for_reporting
-
-    def save_alternative(self, pareto_brute, alternative):
-        """Determines whether the given alternative must be recorded while building the pareto front
-
-        :param pareto_brute: The Brute-force pareto builder instance
-        :param alternative: The alternative transmission expansion plan
-        :return: True if the alternative should be recorded, false otherwise
-        """
-        return self.save_alternative_handle(pareto_brute, alternative, self.save_alternative_handle_params)
-
-    @staticmethod
-    def save_all_alternatives(pareto_brute, alternative, options=None):
-        # type: (ScenariosTepParetoFrontByBruteForce, StaticTePlan, object) -> bool
-        return True
-
-    @staticmethod
-    def save_random_alternatives(pareto_brute, alternative, options=0.2):
-        # type: (ScenariosTepParetoFrontByBruteForce, StaticTePlan, float) -> bool
-        return random.random() > options
-
-    @staticmethod
-    def save_maxrandom_alternatives(pareto_brute, alternative, options=[0.1, 200]):
-        # type: (ScenariosTepParetoFrontByBruteForce, StaticTePlan, float) -> bool
-        # r = random.random()
-        # b = len(pareto_brute.extra_alternatives) < options[1] and r < options[0]
-        # if b:
-        #     logging.info("Recording extra plan {} ({} plans currently recorded), r={}".
-        #                  format(alternative.get_plan_id(), len(pareto_brute.extra_alternatives), r)
-        #                  )
-        return len(pareto_brute.extra_alternatives) < options[1] and random.random() < options[0]
-
-    @staticmethod
-    def save_alternatives_in_range(pareto_brute, alternative, options=None):
-        # type: (ScenariosTepParetoFrontByBruteForce, StaticTePlan, Dict[PowerSystemScenario, List[float]]) -> bool
-        assert options is not None
-        for scenario in pareto_brute.tep_model.tep_system.scenarios:
-            obj_range = options[scenario]
-            obj_plan = alternative.total_costs[scenario]
-            if min(obj_range) > obj_plan or max(obj_range) < obj_plan:
-                return False
-        return True
-
-
 class ScenariosTepParetoFrontBuilder(object):
     def __init__(self, tep_model):
         # type: (TepScenariosModel) -> None
@@ -293,14 +234,13 @@ class ScenariosTepParetoFrontBuilder(object):
         self.minimax_regret_plan = None
         self.df_efficient_alternatives = None  # set by function 'summarize_efficient_alternatives'
 
-    def execute_build_pareto_front(self, save_to_excel=False, excel_filename=''):
+    def execute_build_pareto_front(self):
         self.start_time = time.clock()
         self.build_pareto_front()
         self.elapsed_seconds = time.clock() - self.start_time
-        logging.info("Finished building pareto front, proceeding to summarize results..")
+        logging.info("Finished building pareto front (elapsed={}), proceeding to summarize results...".
+                     format(str(timedelta(seconds=self.elapsed_seconds))))
         self.summarize()
-        if save_to_excel:
-            self.to_excel(excel_filename)
 
     def build_pareto_front(self):
         # type: () -> List[StaticTePlan]
@@ -398,6 +338,65 @@ class ScenariosTepParetoFrontBuilder(object):
                             filename=filename)
 
 
+class ScenariosTepParetoFrontByBruteForceParams(object):
+    def __init__(self, save_extra_alternatives=False,
+                 save_alternative_handle=None, save_alternative_handle_params=None,
+                 plans_processed_for_reporting=None):
+        # type: (bool, object, object, int) -> None
+        """Parameters for brute-force construction of pareto front
+
+        :param save_extra_alternatives: True if all alternatives are to be saved, following some filtering criteria
+        :param save_alternative_handle: Function handle to filter which alternatives to save
+        :param save_alternative_handle_params: Parameters for the filtering function
+        :param plans_processed_for_reporting: Number of plans that must be processed before reporting progress
+        """
+        self.save_extra_alternatives = save_extra_alternatives
+        self.save_alternative_handle = save_alternative_handle
+        self.save_alternative_handle_params = save_alternative_handle_params
+        self.plans_processed_for_reporting = plans_processed_for_reporting
+
+    def save_alternative(self, pareto_brute, alternative):
+        """Determines whether the given alternative must be recorded while building the pareto front
+
+        :param pareto_brute: The Brute-force pareto builder instance
+        :param alternative: The alternative transmission expansion plan
+        :return: True if the alternative should be recorded, false otherwise
+        """
+        return self.save_alternative_handle(pareto_brute, alternative, self.save_alternative_handle_params)
+
+    @staticmethod
+    def save_all_alternatives(pareto_brute, alternative, options=None):
+        # type: (ScenariosTepParetoFrontByBruteForce, StaticTePlan, object) -> bool
+        return True
+
+    @staticmethod
+    def save_random_alternatives(pareto_brute, alternative, options=0.2):
+        # type: (ScenariosTepParetoFrontByBruteForce, StaticTePlan, float) -> bool
+        return random.random() > options
+
+    @staticmethod
+    def save_maxrandom_alternatives(pareto_brute, alternative, options=[0.1, 200]):
+        # type: (ScenariosTepParetoFrontByBruteForce, StaticTePlan, float) -> bool
+        # r = random.random()
+        # b = len(pareto_brute.extra_alternatives) < options[1] and r < options[0]
+        # if b:
+        #     logging.info("Recording extra plan {} ({} plans currently recorded), r={}".
+        #                  format(alternative.get_plan_id(), len(pareto_brute.extra_alternatives), r)
+        #                  )
+        return len(pareto_brute.extra_alternatives) < options[1] and random.random() < options[0]
+
+    @staticmethod
+    def save_alternatives_in_range(pareto_brute, alternative, options=None):
+        # type: (ScenariosTepParetoFrontByBruteForce, StaticTePlan, Dict[PowerSystemScenario, List[float]]) -> bool
+        assert options is not None
+        for scenario in pareto_brute.tep_model.tep_system.scenarios:
+            obj_range = options[scenario]
+            obj_plan = alternative.total_costs[scenario]
+            if min(obj_range) > obj_plan or max(obj_range) < obj_plan:
+                return False
+        return True
+
+
 class ScenariosTepParetoFrontByBruteForce(ScenariosTepParetoFrontBuilder):
     def __init__(self, tep_model,
                  pareto_brute_force_params=ScenariosTepParetoFrontByBruteForceParams()):
@@ -428,11 +427,11 @@ class ScenariosTepParetoFrontByBruteForce(ScenariosTepParetoFrontBuilder):
             # report progress
             self.number_of_processed_plans += 1
             if (self.number_of_processed_plans % self.pareto_brute_force_params.plans_processed_for_reporting) == 0:
-                elapsed_time = time.clock() - self.start_clock
+                self.elapsed_seconds = time.clock() - self.start_time
                 logging.info("Processed {0} alternatives (elapsed: {3}; current ID={1} / {2})...".
                              format(self.number_of_processed_plans,
                                     plan_id, self.number_of_maximum_possible_plans,
-                                    str(timedelta(seconds=elapsed_time))
+                                    str(timedelta(seconds=self.elapsed_seconds))
                                     )
                              )
         return self.efficient_alternatives
@@ -469,18 +468,21 @@ class ScenariosTepParetoFrontByBruteForce(ScenariosTepParetoFrontBuilder):
             startsumm = time.clock()
             for idx, alternative in enumerate(self.extra_alternatives):
                 summary = StaticTePlanDetails(alternative).plan_summary
-                summary['Kind'] = 'Efficient' if alternative in pareto_brute.efficient_alternatives else 'Dominated'
+                summary['Kind'] = 'Efficient' if alternative in self.efficient_alternatives else 'Dominated'
                 summary = pd.DataFrame(summary, index=['Plan{0}'.format(summary['Plan ID'])])
                 list_summaries_extra_alternatives.append(summary)
                 if idx % 100 == 0:
                     elapsed_secs = time.clock() - startsumm
                     logging.info("Summarized {} / {} extra alternatives (elapsed: {})".
-                                 format(idx, len(pareto_brute.extra_alternatives), timedelta(seconds=elapsed_secs))
+                                 format(idx, len(self.extra_alternatives), timedelta(seconds=elapsed_secs))
                                  )
             self.df_extra_alternatives = pd.concat(list_summaries_extra_alternatives)
 
+    def to_excel(self, excel_filename, sheetname=['ParetoAlternatives', 'ParetoSummary', 'DominatedAlternatives']):
+        ScenariosTepParetoFrontBuilder.to_excel(self, excel_filename, sheetname)
+
     def to_excel_sheet(self, writer, sheetname=['ParetoAlternatives', 'ParetoSummary', 'DominatedAlternatives']):
-        ScenariosTepParetoFrontBuilder.to_excel_sheet(writer, sheetname[0:1])
+        ScenariosTepParetoFrontBuilder.to_excel_sheet(self, writer, sheetname[0:2])
         if self.df_extra_alternatives is not None:
             Utils.df_to_excel_sheet_autoformat(self.df_extra_alternatives, writer, sheetname[2])
 

@@ -99,7 +99,7 @@ class TepSolverWorkspace(object):
                 )
                 logging.info("All (unique) processed transmission expansion alternatives will be recorded")
             elif opt == 'random':
-                prob_record = 0.01
+                prob_record = 0.2
                 max_alts_record = 200
                 my_pareto_params = tep.ScenariosTepParetoFrontByBruteForceParams(
                     save_extra_alternatives=save_all,
@@ -108,7 +108,7 @@ class TepSolverWorkspace(object):
                     plans_processed_for_reporting=1000,
                 )
                 logging.info(
-                    "At most {} alternatives will be chosen at random (p={:1%}) for recording extra alternatives".
+                    "At most {} alternatives will be chosen at random (p={:.1%}) for recording extra alternatives".
                         format(max_alts_record, prob_record))
         else:
             my_pareto_params = tep.ScenariosTepParetoFrontByBruteForceParams(
@@ -116,6 +116,7 @@ class TepSolverWorkspace(object):
         # Solve
         self.tep_pareto_solver = tep.ScenariosTepParetoFrontByBruteForce(self.tep_model,
                                                                          pareto_brute_force_params=my_pareto_params)
+        self.tep_pareto_solver.execute_build_pareto_front()
         self.efficient_alternatives = self.tep_pareto_solver.efficient_alternatives
         logging.info(("Finished processing all {0:g} possible (unique) transmission expansion plans (elapsed: {2}): "
                       "{1} efficient transmission expansion alternatives found. ").

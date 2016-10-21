@@ -25,11 +25,15 @@ def get_selection_answer(message="Select one of the following options: ", option
         answer = raw_input(msg)
         if answer == "":
             return default_answer
-        elif answer in options:
-            return answer
+        elif answer in [str(opt) for opt in options]:
+            return [opt for opt in options if str(opt) == answer][0]
         else:
             print "Please write one of the possible options"
             answer = None
+
+
+def get_number_console(message="Provide a number: "):
+    pass
 
 
 def try_save_file(filename, filesaver):

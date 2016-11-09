@@ -9,26 +9,8 @@ from datetime import timedelta
 import logging
 
 
-def eval_tep_scenarios(individual, tep_model):
-    # type: (list, TepScenariosModel.TepScenariosModel) -> List[float]
-    plan = TepScenariosModel.StaticTePlan.from_binary_gene(tep_model, individual)
-    return plan.total_costs.values()
-
-
-def population_unique_fitnesses(pop):
-    fitnesses_set_tuple = []
-    for p in pop:
-        if p.fitness not in fitnesses_set_tuple:
-            fitnesses_set_tuple.append(p.fitness)
-    return set(fitnesses_set_tuple)
-
-
-def pareto_population_unique_fitnesses(pop):
-    return population_unique_fitnesses(tools.sortNondominated(pop, k=2, first_front_only=True)[0])
-
-
 class TepScenariosNsga2SolverParams(object):
-    def __init__(self, number_generations=25, number_individuals=100,
+    def __init__(self, number_generations=1, number_individuals=100,
                  crossover_probability=0.9,
                  mutate_probability=0.05):
         self.number_generations = number_generations
@@ -37,32 +19,63 @@ class TepScenariosNsga2SolverParams(object):
         self.mutate_probability = mutate_probability
 
 
+def eval_tep_scenarios(individual, tep_model):
+    # type: (list, TepScenariosModel.TepScenariosModel) -> List[float]
+    plan = TepScenariosModel.StaticTePlan.from_integer_gene(tep_model, individual)
+    return plan.total_costs.values()
+
+
+def my_init_statictep_individual(container, gene_structure):
+    return container([random.randint(0, gene_structure[i]) for i in range(len(gene_structure))])
+
+
+def my_mut_uniform_int(individual, indpb, gene_structure):
+    for i in xrange(len(individual)):
+        if random.random() < indpb:
+            if gene_structure[i] == 1:
+                individual[i] = type(individual[i])(not individual[i])
+            else:
+                new_gene = random.randint(0, gene_structure[i])
+                while new_gene == individual[i]:
+                    new_gene = random.randint(0, gene_structure[i])
+                individual[i] = new_gene
+    return individual,
+
+
+def get_nondominated(population):
+    # k=1 because if k=0 the function returns []; if first_front_only=True, then k is not used
+    return tools.sortNondominated(population, k=1, first_front_only=True)[0]
+
+
 class TepScenariosNsga2Solver(TepScenariosModel.ScenariosTepParetoFrontBuilder):
-    def __init__(self, tep_model, ga_params=TepScenariosNsga2SolverParams()):
+    def __init__(self, tep_model, ga_params=TepScenariosNsga2SolverParams(),
+                 initial_individuals=None):
         # type: (TepScenariosModel.TepScenariosModel) -> object
         TepScenariosModel.ScenariosTepParetoFrontBuilder.__init__(self, tep_model)
         self.ga_params = ga_params
+        if initial_individuals is not None:
+            assert isinstance(initial_individuals, list)
+            for ind in initial_individuals:
+                assert isinstance(ind, TepScenariosModel.StaticTePlan)
+            self.initial_individuals = initial_individuals
         # Number of scenarios = number of objective functions to minimize
         self.num_scenarios = len(self.tep_model.tep_system.scenarios)
-        # Candidates lines
-        self.num_candidates_lines = len(self.tep_model.tep_system.candidate_lines)
+        # A tuple of integers between 0 and 'n' (number of equivalent candidate lines in a given corridor)
+        #       For example, if there are 5 corridors, three with one candidate line,
+        #       one with two equivalent candidate lines,
+        #       and one with three equivalent candidate lines, then: gene_structure=(1,1,2,1,3)
+        self.gene_structure = [len(lgroup) for lgroup in self.tep_model.tep_system.candidate_lines_groups]
         # Create problem: fitness and individuals
         creator.create("FitnessMin", base.Fitness, weights=(-1.0,) * self.num_scenarios)
         creator.create("Individual", list, fitness=creator.FitnessMin)
         self.toolbox = base.Toolbox()
-        # Attribute generator
-        #                      define 'attr_bool' to be an attribute ('gene')
-        #                      which corresponds to integers sampled uniformly
-        #                      from the range [0,1] (i.e. 0 or 1 with equal
-        #                      probability)
-        self.toolbox.register("attr_bool", random.randint, 0, 1)
         # Structure initializers
-        #                         define 'individual' to be an individual
-        #                         consisting of 'self.num_candidates_lines' 'attr_bool' elements ('genes')
-        self.toolbox.register("individual", tools.initRepeat, creator.Individual,
-                              self.toolbox.attr_bool, self.num_candidates_lines)
+        #       Define 'individual' to be an individual consisting of genes
+        #       with structure provided by self.gene_structure
+        self.toolbox.register("individual", my_init_statictep_individual, creator.Individual, self.gene_structure)
         # define the population to be a list of individuals
         self.toolbox.register("population", tools.initRepeat, list, self.toolbox.individual)
+        self.population = None
         # ----------
         # Operator registration
         # ----------
@@ -72,7 +85,7 @@ class TepScenariosNsga2Solver(TepScenariosModel.ScenariosTepParetoFrontBuilder):
         self.toolbox.register("mate", tools.cxUniform, indpb=0.20)
         # register a mutation operator with a probability to
         # flip each attribute/gene of 0.05
-        self.toolbox.register("mutate", tools.mutFlipBit, indpb=0.05)
+        self.toolbox.register("mutate", my_mut_uniform_int, indpb=0.05, gene_structure=self.gene_structure)
         # operator for selecting >individuals for breeding the next
         # generation: each individual of the current generation
         # is replaced by the 'fittest' (best) of three individuals
@@ -93,12 +106,35 @@ class TepScenariosNsga2Solver(TepScenariosModel.ScenariosTepParetoFrontBuilder):
         self.logbook = tools.Logbook()
         self.logbook.header = "gen", "evals", "avg", "std", "min", "max", "pareto_individuals", "elapsed"
 
-        pop = self.toolbox.population(n=self.ga_params.number_individuals)
+        # Initialize population
+        if self.population is None:
+            logging.debug("Initializing random population")
+            pop = self.toolbox.population(n=self.ga_params.number_individuals)
+        else:
+            for ind in self.population:
+                assert isinstance(ind, self.creator.Individual)
+            if len(self.population) == self.ga_params.number_individuals:
+                pop = self.population
+            else:
+                logging.debug("Population in this instance holds {} individuals but {} individuals are needed.".
+                              format(len(self.population), self.ga_params.number_individuals))
+        # Add initial individuals provided to this instance
+        if self.initial_individuals is not None:
+            idx = 0
+            for initial_ind in self.initial_individuals:
+                initial_ind_gene = creator.Individual(initial_ind.to_integer_gene())
+                logging.debug(("Removing individual at position {} of the initial population "
+                               "and appending initial individual (with lines '{}' and representation '{}')").
+                              format(idx, initial_ind.to_str_repr(), initial_ind_gene)
+                              )
+                del pop[idx]
+                pop.append(initial_ind_gene)
+            logging.debug(("A population with {} individuals results "
+                           "after replacing some random individuals by provided initial individuals").
+                          format(len(pop))
+                          )
         # Evaluate the individuals with an invalid fitness
         invalid_ind = [ind for ind in pop if not ind.fitness.valid]
-        # fitnesses = self.toolbox.map(self.toolbox.evaluate, invalid_ind, self.tep_model)
-        # for ind, fit in zip(invalid_ind, fitnesses):
-        #     ind.fitness.values = fit
         for ind in invalid_ind:
             ind.fitness.values = self.toolbox.evaluate(ind, self.tep_model)
 
@@ -107,14 +143,11 @@ class TepScenariosNsga2Solver(TepScenariosModel.ScenariosTepParetoFrontBuilder):
         pop = self.toolbox.select(pop, len(pop))
 
         record = stats_fit.compile(pop)
-        pareto_pop_fitnesses = None
-        # record['pareto_individuals'] = len(pareto_pop_fitnesses)
-        # record['elapsed'] = 0
         self.logbook.record(gen=0, evals=len(invalid_ind), **record)
         print(self.logbook.stream)
 
         # Begin the generational process
-        for gen in range(1, self.ga_params.number_generations):
+        for gen in xrange(1, self.ga_params.number_generations + 1):
             # Vary the population
             offspring = tools.selTournamentDCD(pop, len(pop))
             offspring = [self.toolbox.clone(ind) for ind in offspring]
@@ -127,34 +160,27 @@ class TepScenariosNsga2Solver(TepScenariosModel.ScenariosTepParetoFrontBuilder):
 
             # Evaluate the individuals with an invalid fitness
             invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
-            # fitnesses = self.toolbox.map(self.toolbox.evaluate, invalid_ind, self.tep_model)
-            # for ind, fit in zip(invalid_ind, fitnesses):
-            #     ind.fitness.values = fit
             for ind in invalid_ind:
                 ind.fitness.values = self.toolbox.evaluate(ind, self.tep_model)
 
             # Select the next generation population
             pop = self.toolbox.select(pop + offspring, self.ga_params.number_individuals)
 
-            # Check for convergence
-            # TODO use existing front from select
-            pareto_pop_prev_fitnesses = pareto_pop_fitnesses
-            pareto_pop_fitnesses = pareto_population_unique_fitnesses(pop)
-            if pareto_pop_prev_fitnesses == pareto_pop_fitnesses:
-                logging.debug("Generations {} and {} have the exact same fitnesses in the pareto front.".
-                              format(gen, gen - 1))
-
             # Report progress
+            self.population = pop
+            self.pareto_pop = get_nondominated(pop)
             self.elapsed_seconds = time.clock() - self.start_time
             record = stats_fit.compile(pop)
-            record['pareto_individuals'] = len(pareto_pop_fitnesses)
+            record['pareto_individuals'] = len(self.pareto_pop)
             record['elapsed'] = timedelta(seconds=self.elapsed_seconds)
             self.logbook.record(gen=gen, evals=len(invalid_ind), **record)
             logging.info(self.logbook.stream)
             logging.debug("Evaluated generation {} with {} efficient individuals (elapsed={}).".
-                          format(gen, len(pareto_pop_fitnesses), timedelta(seconds=self.elapsed_seconds)))
-        self.efficient_alternatives = [TepScenariosModel.StaticTePlan.from_binary_gene(self.tep_model, ind)
-                                       for ind in tools.sortNondominated(pop, k=2, first_front_only=True)[0]]
+                          format(gen, len(self.pareto_pop), timedelta(seconds=self.elapsed_seconds)))
+        # Select unique individuals in the pareto front, sorted by total cost in first scenario
+        self.efficient_alternatives = [TepScenariosModel.StaticTePlan.from_integer_gene(self.tep_model, ind)
+                                       for ind in self.pareto_pop]
+        self.efficient_alternatives.sort(key=lambda a: a.total_costs[self.tep_model.tep_system.scenarios[0]])
         # Set optimal plan for each scenario
         for alternative in self.efficient_alternatives:
             for scenario in self.tep_model.tep_system.scenarios:
@@ -162,3 +188,15 @@ class TepScenariosNsga2Solver(TepScenariosModel.ScenariosTepParetoFrontBuilder):
                         or alternative.total_costs[scenario] < self.optimal_plans[scenario].total_costs[scenario]:
                     self.optimal_plans[scenario] = alternative
         return self.efficient_alternatives
+
+    def i_have_valid_population(self):
+        # type: () -> bool
+        if self.population is None:
+            return False
+        else:
+            for ind in self.population:
+                if not isinstance(ind, self.creator.Individual):
+                    return False
+            if len(self.population) == self.ga_params.number_individuals:
+                return True
+        return False

@@ -22,3 +22,7 @@ def subset_from_id(s, i):
 def subset_to_id(s, subset):
     l = len(s)
     return sum([(1 << j) for j in range(l) if s[j] in subset])
+
+
+def subset_to_str(s, subset):
+    return ''.join(('1' if l in subset else '0') for l in s)

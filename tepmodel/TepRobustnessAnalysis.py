@@ -57,8 +57,14 @@ class SecondOrderRobustnessMeasureCalculator(object):
     def __init__(self, efficient_alternatives):
         # type: (List[TepScenariosModel.StaticTePlan]) -> None
         self.efficient_alternatives = efficient_alternatives
+        # Add the worse possible point, in order to ensure a meaningful convex hull
+        self.worse_plan_vertex = []
+        for s in self.efficient_alternatives[0].tep_model.tep_system.scenarios:
+            self.worse_plan_vertex.append(max(alt.total_costs[s] for alt in self.efficient_alternatives))
+        self.worse_plan_vertex = np.array(self.worse_plan_vertex)
         # Convex hull of pareto front is obtained, in order to efficiently calculate the robustness measure
         self.efficient_points = np.array(list(alt.total_costs.values() for alt in self.efficient_alternatives))
+        # self.efficient_points = np.concatenate((self.efficient_points, self.worse_plan_vertex), axis=0)
         self.pareto_chull = ConvexHull(self.efficient_points)
         # simplices of the convex hull
         self.simplices = dict()
@@ -87,12 +93,13 @@ class SecondOrderRobustnessMeasureCalculator(object):
         # Relate expansion plans with simplices and calculate robustness measure
         self.plans_with_robustness = []
         list_summary_plans_with_robustness = []
-        for plan in self.efficient_alternatives:
+        for idx, plan in enumerate(self.efficient_alternatives):
             plan_simplices = list(s for s in self.simplices.itervalues() if plan in s.vertices)
             is_in_border = len(plan_simplices) < len(plan.tep_model.tep_system.scenarios)
             plan_with_robustness = StaticTePlanForRobustnessCalculation(plan, plan_simplices, is_in_border)
             self.plans_with_robustness.append(plan_with_robustness)
-            list_summary_plans_with_robustness.append(plan_with_robustness.df_summary)
+            df_summary = pd.DataFrame(plan_with_robustness.summary, index=['Plan{0}'.format(idx)])
+            list_summary_plans_with_robustness.append(df_summary)
         self.df_summary = pd.concat(list_summary_plans_with_robustness)
 
     def to_excel(self, excel_filename, sheetname='AlternativesRobustness'):
@@ -111,12 +118,12 @@ class StaticTePlanForRobustnessCalculation(object):
     def __init__(self, plan, simplices, is_in_border):
         # type: (tepmodel.StaticTePlan, object, bool) -> None
         self.plan = plan
-        self.plan_id = self.plan.get_plan_id()
+        self.plan_id = self.plan.get_plan_str_repr()  # self.plan.get_plan_id()
         self.simplices = simplices
         self.is_in_border = is_in_border
         self.robustness_measure = float('nan')
         self.summary = collections.OrderedDict()
-        self.summary['Plan ID'] = self.plan_id
+        # self.summary['Plan ID'] = self.plan_id
         if not self.is_in_border:
             if len(self.simplices) == 2:
                 probabilities_first_scenario = sorted(list(s.scenario_probabilities[0] for s in self.simplices))
@@ -147,4 +154,4 @@ class StaticTePlanForRobustnessCalculation(object):
                             )
         self.summary['Robustness Measure [%]'] = self.robustness_measure
         self.summary['Is in border?'] = self.is_in_border
-        self.df_summary = pd.DataFrame(self.summary, index=['Plan{0}'.format(self.plan_id)])
+        # self.df_summary = pd.DataFrame(self.summary, index=['Plan{0}'.format(self.plan_id)])

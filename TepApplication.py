@@ -15,14 +15,15 @@ class TepSolverWorkspace(object):
         self.tep_case_name = os.path.basename(self.workspace_dir)
         # the name of the current test case defaults to the same name of the containing folder
         self.tep_case_filename = self.tep_case_name + '.xlsx'
-        self.tep_model = tep.TepScenariosModel.TepScenariosModel.import_from_excel(
-            self.from_relative_to_abs_path(self.tep_case_filename))
+        self.tep_case_filepath = self.from_relative_to_abs_path(self.tep_case_filename)
+        self.tep_model = tep.TepScenariosModel.TepScenariosModel.import_from_excel(self.tep_case_filepath)
         # results folder
         self.results_folder = self.from_relative_to_abs_path(self.tep_case_name + "_Results")
         if not os.path.isdir(self.results_folder):
             os.mkdir(self.results_folder)
 
         # pareto solver
+        self.ga_params = tep.TepScenariosNsga2SolverParams.import_from_excel(self.tep_case_filepath)
         self.pareto_excel_filename = None
         self.pareto_plot_filename = None
         self.tep_pareto_solver = None  # type: tep.TepScenariosModel.ScenariosTepParetoFrontBuilder
@@ -88,6 +89,7 @@ class TepSolverWorkspace(object):
         logging.info("Beginning construction of pareto front by NSGA-II")
         logging.info("{} individuals were provided to initialize NSGA-II".format(len(initial_individuals)))
         self.tep_pareto_solver = tep.TepScenariosNsga2Solver(self.tep_model,
+                                                             ga_params=self.ga_params,
                                                              initial_individuals=initial_individuals)  # type: tep.TepScenariosNsga2Solver
         self.tep_pareto_solver.execute_build_pareto_front()
         self.efficient_alternatives = self.tep_pareto_solver.efficient_alternatives

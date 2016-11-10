@@ -7,6 +7,7 @@ import TepScenariosModel
 import time
 from datetime import timedelta
 import logging
+import Utils
 
 
 class TepScenariosNsga2SolverParams(object):
@@ -17,6 +18,18 @@ class TepScenariosNsga2SolverParams(object):
         self.number_individuals = number_individuals
         self.crossover_probability = crossover_probability
         self.mutate_probability = mutate_probability
+
+    @staticmethod
+    def import_from_excel(excel_filepath):
+        ga_params = TepScenariosNsga2SolverParams()
+        dict_ga_params = Utils.excel_worksheet_to_dict(excel_filepath, 'TepParameters')
+        for key, param_value in dict_ga_params.iteritems():
+            if key.startswith('ga_params'):
+                param_name = key[key.find('.') + 1:]
+                if param_name in ['number_generations', 'number_individual']:
+                    param_value = int(param_value)
+                setattr(ga_params, param_name, param_value)
+        return ga_params
 
 
 def eval_tep_scenarios(individual, tep_model):
@@ -44,7 +57,9 @@ def my_mut_uniform_int(individual, indpb, gene_structure):
 
 def get_nondominated(population):
     # k=1 because if k=0 the function returns []; if first_front_only=True, then k is not used
-    return tools.sortNondominated(population, k=1, first_front_only=True)[0]
+    all_nondominated = tools.sortNondominated(population, k=1, first_front_only=True)[0]
+    unique_nondominated = set(tuple(ind) for ind in all_nondominated)
+    return unique_nondominated
 
 
 class TepScenariosNsga2Solver(TepScenariosModel.ScenariosTepParetoFrontBuilder):

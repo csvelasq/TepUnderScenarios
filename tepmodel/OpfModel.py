@@ -4,24 +4,37 @@ import collections
 import xlsxwriter
 import GrbOptModel as mygrb
 import Utils
+import math
+import logging
 
 
 class OpfModelParameters(object):
     def __init__(self, load_shedding_cost=2000,
                  base_mva=100,
-                 slack_bus=None,
+                 slack_bus_name=None,
                  bus_angle_min=-grb.GRB.INFINITY, bus_angle_max=grb.GRB.INFINITY,
                  bus_angle_max_difference=None,
                  obj_func_multiplier=1e-6,  # US$ -> MMUS$
                  grb_opt_params=mygrb.GrbOptParameters()):
         self.load_shedding_cost = load_shedding_cost
         self.base_mva = base_mva
-        self.slack_bus = slack_bus
+        self.slack_bus_name = slack_bus_name
         self.bus_angle_min = bus_angle_min
         self.bus_angle_max = bus_angle_max
         self.bus_angle_max_difference = bus_angle_max_difference
         self.obj_func_multiplier = obj_func_multiplier
         self.grb_opt_params = grb_opt_params
+
+    @staticmethod
+    def import_from_dict(dict_params):
+        opf_model_params = OpfModelParameters()
+        for key, value in dict_params.iteritems():
+            if key.startswith('opf_params'):
+                opf_param_name = key[key.find('.') + 1:]
+                if opf_param_name == 'slack_bus_name' and isinstance(value, float):
+                    value = str(int(value))
+                setattr(opf_model_params, opf_param_name, value)
+        return opf_model_params
 
 
 class OpfModel(mygrb.GrbOptModel):
@@ -36,8 +49,9 @@ class OpfModel(mygrb.GrbOptModel):
         self.state = state
         self.model = model
         self.opf_model_params = opf_model_params
-        if self.opf_model_params.slack_bus is None:
-            self.slack_bus = self.state.system.nodes[0]
+        self.slack_bus = self.state.system.nodes[0]
+        if self.opf_model_params.slack_bus_name is not None:
+            self.slack_bus = self.state.find_node_state_by_name(self.opf_model_params.slack_bus_name)
         # Model variables
         self.pgen = {}
         self.load_shed = {}
@@ -46,6 +60,8 @@ class OpfModel(mygrb.GrbOptModel):
         # Model constraints
         self.nodal_power_balance = {}
         self.dc_power_flow = {}
+
+    def build_model(self):
         # build gurobi model
         self.create_grb_vars()
         self.model.modelSense = grb.GRB.MINIMIZE
@@ -53,39 +69,48 @@ class OpfModel(mygrb.GrbOptModel):
         self.create_grb_constraints()
 
     def create_grb_vars(self):
-        # Create nodal variables: pgen, load_shed and bus_angle
+        # Create nodal variables: load_shed and bus_angle
         for node_state in self.state.node_states:
-            # variables are created even if a node has no load or generator
-            pgen_obj = node_state.generation_marginal_cost * self.state.duration
-            self.pgen[node_state] = self.model.addVar(lb=0,
-                                                      ub=node_state.available_generating_capacity,
-                                                      obj=pgen_obj * self.opf_model_params.obj_func_multiplier,
-                                                      name='Pg{0}_{1}'.format(node_state.node.name, self.state))
+            # variables are created even if a node has no load
             lshed_obj = self.opf_model_params.load_shedding_cost * self.state.duration
             self.load_shed[node_state] = self.model.addVar(lb=0,
                                                            ub=node_state.load_state,
                                                            obj=lshed_obj * self.opf_model_params.obj_func_multiplier,
-                                                           name='Ls{0}_{1}'.format(node_state.node.name, self.state))
-            if node_state.node == self.slack_bus:
+                                                           name='Ls{0}'.format(node_state))
+            if node_state == self.slack_bus:
                 self.bus_angle[node_state] = self.model.addVar(lb=0,
                                                                ub=0,
-                                                               obj=0)
+                                                               obj=0,
+                                                               name='Ang{}'.format(node_state))
             else:
                 self.bus_angle[node_state] = self.model.addVar(lb=self.opf_model_params.bus_angle_min,
                                                                ub=self.opf_model_params.bus_angle_max,
-                                                               obj=0)
+                                                               obj=0,
+                                                               name='Ang{}'.format(node_state))
+        # Create generator variables: pgen
+        for generator_state in self.state.generators_states:
+            pgen_obj = generator_state.generation_marginal_cost * self.state.duration
+            self.pgen[generator_state] = self.model.addVar(lb=0,
+                                                           ub=generator_state.available_generating_capacity,
+                                                           obj=pgen_obj * self.opf_model_params.obj_func_multiplier,
+                                                           name='Pg{0}'.format(generator_state))
         # Create line variables: power_flow
         for line_state in self.state.transmission_lines_states:
             # unavailable transmission lines are deactivated but included in the model
             cap = line_state.isavailable * line_state.transmission_line.thermal_capacity
             self.power_flow[line_state] = self.model.addVar(lb=-cap,
                                                             ub=+cap,
-                                                            obj=0)
+                                                            obj=0,
+                                                            name='Pf{0}'.format(line_state))
 
     def create_grb_constraints(self):
-        # Create nodal_power_balance constraints
+        self.create_grb_constraints_nodal_power_balance()
+        self.create_grb_constraints_dc_power_flow()
+
+    def create_grb_constraints_nodal_power_balance(self):
         for node_state in self.state.node_states:
-            rhs_expr = grb.LinExpr(self.pgen[node_state])
+            rhs_expr = sum(self.pgen[generator_state] for generator_state in self.state.generators_states
+                           if generator_state.connection_node_state == node_state)
             for line_state in node_state.find_incoming_lines_states():
                 rhs_expr += self.power_flow[line_state]
             for line_state in node_state.find_outgoing_lines_states():
@@ -93,10 +118,20 @@ class OpfModel(mygrb.GrbOptModel):
             self.nodal_power_balance[node_state] = \
                 self.model.addConstr(rhs_expr,
                                      grb.GRB.EQUAL,
-                                     node_state.load_state - self.load_shed[node_state]
+                                     node_state.load_state - self.load_shed[node_state],
+                                     name='Pbalance{}'.format(node_state)
                                      )
-        # Create dc_power_flow constraints
-        for line_state in self.state.transmission_lines_states:
+
+    def create_grb_constraints_dc_power_flow(self, transmission_lines_states=None):
+        """Creates DC power flow constraints in terms of bus angles
+
+        :param transmission_lines_states: A subset of the transmission lines for which the constraints will be generated. If None, the constraints will be generated for all transmission lines states in the model
+        :return: None
+        """
+        if transmission_lines_states is None:
+            transmission_lines_states = self.state.transmission_lines_states
+        processed_bus_pairs = []
+        for line_state in transmission_lines_states:
             bus_angle_from = self.bus_angle[line_state.node_from_state]
             bus_angle_to = self.bus_angle[line_state.node_to_state]
             # unavailable transmission lines are deactivated but included in the model
@@ -104,13 +139,26 @@ class OpfModel(mygrb.GrbOptModel):
             self.dc_power_flow[line_state] = \
                 self.model.addConstr(self.power_flow[line_state],
                                      grb.GRB.EQUAL,
-                                     susceptance * bus_angle_from - susceptance * bus_angle_to)
-            # TODO Create bus angle difference constraint, based on self.bus_angle_max_difference
+                                     susceptance * bus_angle_from - susceptance * bus_angle_to,
+                                     name='DCFlow{}'.format(line_state)
+                                     )
+            # Create constraints for maximum bus angle difference
+            if (bus_angle_from, bus_angle_to) not in processed_bus_pairs:
+                processed_bus_pairs.append((bus_angle_from, bus_angle_to))
+                if self.opf_model_params.bus_angle_max_difference is not None:
+                    angle_diff_expr = bus_angle_from - bus_angle_to
+                    self.create_grb_abs_constraint_pair(lhs_in_abs=angle_diff_expr,
+                                                        rhs=self.opf_model_params.bus_angle_max_difference,
+                                                        name='AngleDiff')
 
     def get_lmps(self):
         """Calculates nodal spot prices for the solution in this opf"""
         assert self.is_solved_to_optimality()
-        shadow_prices = self.get_grb_constraints_shadow_prices(self.nodal_power_balance)
+        try:
+            shadow_prices = self.get_grb_constraints_shadow_prices(self.nodal_power_balance)
+        except grb.GurobiError:
+            logging.info("Unable to get shadow prices.")
+            shadow_prices = dict(zip(self.state.node_states, [float('NaN')] * len(self.state.node_states)))
         for key, val in shadow_prices.iteritems():
             shadow_prices[key] = val / (self.opf_model_params.obj_func_multiplier * self.state.duration)
         return shadow_prices
@@ -136,8 +184,8 @@ class OpfModelResults(object):
         self.summary_sol = collections.OrderedDict()
         self.summary_sol['Objective Function Value'] = opf_model.get_grb_objective_value()
         self.summary_sol['State Duration [hours]'] = self.state.duration
-        hourly_gen_costs = sum(pgen_sol[node_state] * node_state.generation_marginal_cost
-                               for node_state in opf_model.state.node_states)
+        hourly_gen_costs = sum(pgen_sol[generator_state] * generator_state.generation_marginal_cost
+                               for generator_state in opf_model.state.generators_states)
         hourly_ls_costs = sum(load_shed_sol[node_state] * opf_model.opf_model_params.load_shedding_cost
                               for node_state in opf_model.state.node_states)
         self.summary_sol['Total Operation Costs [MMUS$]'] = (
@@ -175,37 +223,57 @@ class OpfModelResults(object):
                                                    'Hourly Load Shedding Cost [US$/h]',
                                                    'Relative Load Shedding Cost [%]',
                                                    'Spot Price [US$/MWh]',
-                                                   'Marginal Generation Cost [US$/MWh]',
                                                    'Power Generated [MW]',
-                                                   'Available Generating Capacity [MW]',
-                                                   'Generation Capacity Factor [%]',
                                                    'Load [MW]',
                                                    'Load Shed [MW]',
                                                    'Consumption [MW]',
                                                    'Relative Load Shed [%]',
-                                                   'Bus Angle [rad]'])
+                                                   'Bus Angle [rad]',
+                                                   'Bus Angle [deg]'])
         n = 0
         for node_state in opf_model.state.node_states:
             # costs are converted back from MMUS$ to US$
-            pcost = pgen_sol[node_state] * node_state.generation_marginal_cost
+            pgen_node = sum(pgen_sol[generator_state]
+                            for generator_state in self.state.generators_states
+                            if generator_state.connection_node_state == node_state)
+            pcost_node = sum(pgen_sol[generator_state] * generator_state.generation_marginal_cost
+                             for generator_state in self.state.generators_states
+                             if generator_state.connection_node_state == node_state)
             lscost = load_shed_sol[node_state] * opf_model.opf_model_params.load_shedding_cost
-            op_cost = pcost + lscost
+            op_cost = pcost_node + lscost
             row = [node_state.node.name,
                    op_cost,
-                   pcost,
+                   pcost_node,
                    lscost,
                    Utils.get_utilization(lscost, op_cost),
                    spot_prices_sol[node_state],
-                   node_state.generation_marginal_cost,
-                   pgen_sol[node_state],
-                   node_state.available_generating_capacity,
-                   Utils.get_utilization(pgen_sol[node_state], node_state.available_generating_capacity),
+                   pgen_node,
                    node_state.load_state,
                    load_shed_sol[node_state],
                    node_state.load_state - load_shed_sol[node_state],
                    Utils.get_utilization(load_shed_sol[node_state], node_state.load_state),
-                   bus_angle_sol[node_state]]
+                   bus_angle_sol[node_state],
+                   bus_angle_sol[node_state] * 180 / math.pi]
             self.df_nodal_soln.loc[n] = row
+            n += 1
+        # generator hourly solution
+        self.df_generator_soln = pd.DataFrame(columns=['Generator',
+                                                       'Hourly Generation Cost [US$/h]',
+                                                       'Marginal Generation Cost [US$/MWh]',
+                                                       'Power Generated [MW]',
+                                                       'Available Generating Capacity [MW]',
+                                                       'Generation Capacity Factor [%]'])
+        n = 0
+        for generator_state in opf_model.state.generators_states:
+            # costs are converted back from MMUS$ to US$
+            pcost = pgen_sol[generator_state] * generator_state.generation_marginal_cost
+            row = [generator_state.generator.name,
+                   pcost,
+                   generator_state.generation_marginal_cost,
+                   pgen_sol[generator_state],
+                   generator_state.available_generating_capacity,
+                   Utils.get_utilization(pgen_sol[generator_state], generator_state.available_generating_capacity)]
+            self.df_generator_soln.loc[n] = row
             n += 1
         # transmission lines power flows in solution [MW]
         self.df_lines_soln = pd.DataFrame(columns=['Transmission Line',
@@ -218,9 +286,9 @@ class OpfModelResults(object):
                                                    'Spot price from-to [US$/MWh]',
                                                    'Congestion Rents [US$/h]',
                                                    'Congestion Rents [MMUS$]',
-                                                   'Angle from [rad]',
-                                                   'Angle to [rad]',
-                                                   'Angle from-to [rad]',
+                                                   'Angle from [deg]',
+                                                   'Angle to [deg]',
+                                                   'Angle from-to [deg]',
                                                    'Susceptance [pu]'])
         n = 0
         total_congestion_rents = 0
@@ -228,6 +296,8 @@ class OpfModelResults(object):
             spot_diff = spot_prices_sol[line_state.node_from_state] - spot_prices_sol[line_state.node_to_state]
             congestion_rent = abs(spot_diff * power_flow_sol[line_state])
             total_congestion_rents += congestion_rent
+            angle_from = bus_angle_sol[line_state.node_from_state] * 180 / math.pi
+            angle_to = bus_angle_sol[line_state.node_to_state] * 180 / math.pi
             row = [str(line_state.transmission_line),
                    line_state.isavailable,
                    power_flow_sol[line_state],
@@ -239,9 +309,9 @@ class OpfModelResults(object):
                    spot_diff,
                    congestion_rent,
                    congestion_rent * self.state.duration / 1e6,
-                   bus_angle_sol[line_state.node_from_state],
-                   bus_angle_sol[line_state.node_to_state],
-                   bus_angle_sol[line_state.node_from_state] - bus_angle_sol[line_state.node_to_state],
+                   angle_from,
+                   angle_to,
+                   angle_from - angle_to,
                    line_state.transmission_line.susceptance]
             self.df_lines_soln.loc[n] = row
             n += 1
@@ -281,6 +351,8 @@ class OpfModelResults(object):
             Utils.df_to_excel_sheet_autoformat(self.df_summary, writer, sheetname_summary)
         sheetname_nodal = sheetname_prefix + "{0}_nodes".format(self.state.name)
         Utils.df_to_excel_sheet_autoformat(self.df_nodal_soln, writer, sheetname_nodal)
+        sheetname_generators = sheetname_prefix + "{0}_generators".format(self.state.name)
+        Utils.df_to_excel_sheet_autoformat(self.df_generator_soln, writer, sheetname_generators)
         sheetname_lines = sheetname_prefix + "{0}_lines".format(self.state.name)
         Utils.df_to_excel_sheet_autoformat(self.df_lines_soln, writer, sheetname_lines)
 
@@ -296,12 +368,20 @@ class ScenarioOpfModel(mygrb.GrbOptModel):
         mygrb.GrbOptModel.__init__(self, model)
         self.scenario = scenario
         self.opf_model_params = opf_model_params
-        # Build OPF model for each state
+        # OPF model and results for each state
         self.opf_models = dict()
         self.opf_models_results = dict()
+
+    def build_model(self):
         for state in self.scenario.states:
-            opf_model = OpfModel(state, self.opf_model_params, self.model)
+            opf_model = self.build_opf_model_one_state(state)
             self.opf_models[state] = opf_model
+        self.model_is_built = True
+
+    def build_opf_model_one_state(self, state):
+        opf_model = OpfModel(state, self.opf_model_params, self.model)
+        opf_model.build_model()
+        return opf_model
 
 
 class ScenarioOpfModelResults(object):
@@ -354,7 +434,6 @@ class ScenarioOpfModelResults(object):
         # join summary of solution for each state in this scenario
         list_states_summaries = []
         for state in self.scenario.states:
-            sname = "{0}_{1}".format(self.scenario.name, state.name)
             list_states_summaries.append(self.opf_models_results[state].df_summary)
         self.df_states_summaries = pd.concat(list_states_summaries)
         # TODO detailed nodal and line solutions for this scenario (collection of states)
@@ -365,7 +444,7 @@ class ScenarioOpfModelResults(object):
         # Close the Pandas Excel writer and output the Excel file.
         writer.save()
 
-    def to_excel_sheets(self, writer, recursive=False):
+    def to_excel_sheets(self, writer, recursive=True):
         # summary of this scenario. if recursive, this summary is written along other scenarios
         if not recursive:
             sheetname_summary = "{0}".format(self.scenario.name)
@@ -432,7 +511,7 @@ class ScenariosOpfModelResults(object):
         # Close the Pandas Excel writer and output the Excel file.
         writer.save()
 
-    def to_excel_sheets(self, writer, recursive=False):
+    def to_excel_sheets(self, writer, recursive=True):
         # summary of operation under all scenarios, in a single sheet
         sheetname_summary = 'Scenarios'
         Utils.df_to_excel_sheet_autoformat(self.scenarios_models_summaries, writer, sheetname_summary)

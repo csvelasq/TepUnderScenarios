@@ -2,6 +2,7 @@ import pandas as pd
 import PowerSystem as pws
 import PowerSystemState as pwstate
 import logging
+import numbers
 
 
 class PowerSystemScenario(object):
@@ -15,11 +16,14 @@ class PowerSystemScenario(object):
         return self.name
 
     @staticmethod
-    def import_scenarios_from_excel(excel_filepath):
+    def import_scenarios_from_excel(excel_filepath, system=None):
         # type: (str) -> list[PowerSystemScenario]
-        imported_system = pws.PowerSystem.import_from_excel(excel_filepath)
+        if system is None:
+            imported_system = pws.PowerSystem.import_from_excel(excel_filepath)
+        else:
+            imported_system = system
         imported_scenarios = []
-        # import ScenariosDefinition
+        # import definition of scenarios (consisting of a name only)
         df_scenarios_definition = pd.read_excel(excel_filepath, sheetname="ScenariosDefinition")
         scenario_names = df_scenarios_definition.ScenarioName.unique()
         for name in scenario_names:
@@ -34,21 +38,24 @@ class PowerSystemScenario(object):
                                              row['StateName'],
                                              row['Duration'])
             scenario.states.append(state)
-        # import ScenarioData
-        df_scenarios_data = pd.read_excel(excel_filepath, sheetname="ScenarioData")
-        for index, row in df_scenarios_data.iterrows():
+        # import load scenario data
+        df_scenarios_load_data = pd.read_excel(excel_filepath, sheetname="ScenarioLoadData")
+        for index, row in df_scenarios_load_data.iterrows():
             for scenario in imported_scenarios:
                 for state in scenario.states:
+                    node_name = row['Node']
+                    if isinstance(node_name, numbers.Number):
+                        node_name = str(int(node_name))
                     node_state = next(x for x in state.node_states
-                                      if x.node.name == row['Node'])  # type: pwstate.NodeState
+                                      if x.node.name == node_name)  # type: pwstate.NodeState
                     node_state.load_state = row["Load-{0}-{1}".format(scenario.name, state.name)]
-                    node_state.available_generating_capacity = row["Gx-{0}-{1}".format(scenario.name, state.name)]
-                    node_state.generation_marginal_cost = row["MG-{0}-{1}".format(scenario.name, state.name)]
-                    # verify imported data
-                    # assert node_state.available_generating_capacity <= node_state.node.installed_generating_capacity
-                    if node_state.available_generating_capacity > node_state.node.installed_generating_capacity:
-                        logging.warning(
-                            "Error importing node '{0}': available generating capacity={1} MW in state '{2}' exceeds installed generating capacity of {3} MW.".format(
-                                node_state.node.name, node_state.available_generating_capacity, state.name,
-                                node_state.node.installed_generating_capacity))
+        # import generators scenario data
+        df_scenarios_gen_data = pd.read_excel(excel_filepath, sheetname="ScenarioGenData")
+        for index, row in df_scenarios_gen_data.iterrows():
+            for scenario in imported_scenarios:
+                for state in scenario.states:
+                    generator_state = next(x for x in state.generators_states
+                                           if x.generator.name == row['Generator'])  # type: pwstate.GeneratorState
+                    generator_state.available_generating_capacity = row["Gx-{0}-{1}".format(scenario.name, state.name)]
+                    generator_state.generation_marginal_cost = row["MG-{0}-{1}".format(scenario.name, state.name)]
         return imported_scenarios

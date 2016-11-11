@@ -1,5 +1,8 @@
 """Power system planning classes"""
+from tempfile import _candidate_tempdir_list
+
 from PowerSystemScenario import PowerSystemScenario
+import PowerSystem as pws
 import pandas as pd
 import itertools
 
@@ -12,16 +15,33 @@ class CandidateTransmissionLine(object):
         self.investment_cost = investment_cost
 
     @staticmethod
-    def import_from_excel(system, excel_filepath):
-        # type: (powersys.PowerSystem.PowerSystem, str) -> list[CandidateTransmissionLine]
-        df_candidate_lines = pd.read_excel(excel_filepath, sheetname="CandidateTransmissionLines")
+    def create_candidate_lines(system, excel_filepath):
+        # type: (PowerSystem, unicode) -> List[List[CandidateTransmissionLine]]
+        """Import candidate transmission lines (both in new and existing corridors)"""
+        df_candidate_lines = pd.read_excel(excel_filepath, sheetname="TransmissionLines")
         candidate_lines = []
         for index, row in df_candidate_lines.iterrows():
-            transmission_line = next(line for line in system.transmission_lines
-                                     if line.name == row['name'])
-            candidate_line = CandidateTransmissionLine(transmission_line,
-                                                       row['investment_cost'])
-            candidate_lines.append(candidate_line)
+            max_new_lines = row['max_new_lines']
+            if max_new_lines > 0:
+                investment_cost = row['investment_cost']
+                if row['is_new']:
+                    transmission_line = pws.TransmissionLine(system,
+                                                             row['name'],
+                                                             system.find_node(row['node_from']),
+                                                             system.find_node(row['node_to']),
+                                                             row['susceptance'],
+                                                             row['thermal_capacity'])
+                else:
+                    transmission_line = next(line for line in system.transmission_lines
+                                             if line.name == row['name'])
+                # Creates new transmission lines in the power system model (one for each new candidate)
+                candidates_lines_this_group = []
+                for i in range(max_new_lines):
+                    new_line_name = transmission_line.name + "_TC{}".format(i + 1)
+                    new_line = pws.TransmissionLine.copy_line(transmission_line, new_line_name)
+                    system.transmission_lines.append(new_line)
+                    candidates_lines_this_group.append(CandidateTransmissionLine(new_line, investment_cost))
+                candidate_lines.append(candidates_lines_this_group)
         return candidate_lines
 
     def is_equivalent(self, other_candidate):
@@ -34,15 +54,19 @@ class CandidateTransmissionLine(object):
     def __str__(self):
         return str(self.transmission_line)
 
+    def to_str_nodes(self):
+        return self.transmission_line.to_str_nodes()
+
 
 class PowerSystemTransmissionPlanning(object):
     """A transmission expansion planning setup"""
 
-    def __init__(self, scenarios, candidate_lines):
-        # type: (List[powersys.PowerSystemScenario.PowerSystemScenario], List[powersys.PowerSystemPlanning.CandidateTransmissionLine]) -> None
+    def __init__(self, scenarios, candidate_lines_groups):
+        # type: (List[powersys.PowerSystemScenario.PowerSystemScenario], List[List[powersys.PowerSystemPlanning.CandidateTransmissionLine]]) -> None
         self.system = scenarios[0].system
         self.scenarios = scenarios
-        self.candidate_lines = candidate_lines
+        self.candidate_lines_groups = candidate_lines_groups
+        self.candidate_lines_flat_list = [item for sublist in self.candidate_lines_groups for item in sublist]
 
     def commit_build_lines(self, lines_to_build):
         """Modifies internal scenarios and their states to activate only the selected candidate transmission lines,
@@ -53,53 +77,31 @@ class PowerSystemTransmissionPlanning(object):
             for state in scenario.states:
                 # check only for candidate transmission lines
                 for line_state in state.transmission_lines_states:
-                    if self.transmission_line_is_candidate(line_state.transmission_line):
-                        line_state.isavailable = line_state.transmission_line in (l.transmission_line
-                                                                                  for l in lines_to_build)
+                    line = line_state.transmission_line
+                    if self.transmission_line_is_candidate(line):
+                        line_state.isavailable = line in (l.transmission_line for l in lines_to_build)
 
     def transmission_line_is_candidate(self, transmission_line):
         return transmission_line in (candidate.transmission_line
-                                     for candidate in self.candidate_lines)
+                                     for candidate in self.candidate_lines_flat_list)
 
-    @staticmethod
-    def get_sets_of_equivalent_lines_idx(candidates_lines):
-        # type: (List[CandidateTransmissionLine]) -> List[List[CandidateTransmissionLine]]
-        n = len(candidates_lines)
-        equivalent_lines_idx = []
-        for i in range(n):
-            candidate1 = candidates_lines[i]  # type: CandidateTransmissionLine
-            equivalent_lines_to_c1_idx = [i]
-            for j in range(i, n):
-                candidate2 = candidates_lines[j]  # type: CandidateTransmissionLine
-                if candidate1.is_equivalent(candidate2):
-                    equivalent_lines_to_c1_idx.append(j)
-            if len(equivalent_lines_to_c1_idx) > 1:
-                equivalent_lines_idx.append(equivalent_lines_to_c1_idx)
-        return equivalent_lines_idx
-
-    @staticmethod
-    def get_sets_of_equivalent_lines(candidates_lines):
-        # type: (List[CandidateTransmissionLine]) -> List[List[CandidateTransmissionLine]]
-        n = len(candidates_lines)
-        equivalent_lines = []
-        for i in range(n):
-            candidate1 = candidates_lines[i]  # type: CandidateTransmissionLine
-            equivalent_lines_to_c1 = []
-            for j in range(i, n):
-                candidate2 = candidates_lines[j]  # type: CandidateTransmissionLine
-                if candidate1.is_equivalent(candidate2):
-                    equivalent_lines_to_c1.append(candidate2)
-            if len(equivalent_lines_to_c1) > 0:
-                equivalent_lines.append(equivalent_lines_to_c1)
-        return equivalent_lines
+    def find_candidate_line_by_name(self, candidate_line_name):
+        found_candidates = [l for l in self.candidate_lines_flat_list
+                            if l.transmission_line.name == candidate_line_name]
+        return found_candidates[0]
 
     @staticmethod
     def import_from_excel(excel_filepath):
         # type: (str) -> PowerSystemTransmissionPlanning
-        # import scenarios
-        scenarios = PowerSystemScenario.import_scenarios_from_excel(excel_filepath)  # type: list[PowerSystemScenario]
+        # import power system
+        system = pws.PowerSystem.import_from_excel(excel_filepath)
         # import candidate transmission lines
-        candidate_lines = CandidateTransmissionLine.import_from_excel(scenarios[0].system, excel_filepath)
+        #   A list of groups of equivalent candidate transmission lines is created
+        #   For each candidate line, a new transmission line is also created in the base power system
+        candidate_lines_groups = CandidateTransmissionLine.create_candidate_lines(system, excel_filepath)
+        # import scenarios
+        scenarios = PowerSystemScenario.import_scenarios_from_excel(excel_filepath,
+                                                                    system)  # type: list[PowerSystemScenario]
         # build imported system
-        imported_planning_system = PowerSystemTransmissionPlanning(scenarios, candidate_lines)
+        imported_planning_system = PowerSystemTransmissionPlanning(scenarios, candidate_lines_groups)
         return imported_planning_system

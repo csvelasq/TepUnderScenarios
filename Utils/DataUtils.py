@@ -41,7 +41,7 @@ def df_to_excel_sheet_autoformat(df, writer, sheetname):
     # Get the xlsxwriter workbook and worksheet objects.
     workbook = writer.book
     worksheet = writer.sheets[sheetname]
-    # Add some cell formats.
+    # Add some cell formats
     format_costs = workbook.add_format({'num_format': '$#,##0.00'})
     format_number = workbook.add_format({'num_format': '#,##0.00'})
     format_percentage = workbook.add_format({'num_format': '0.0%'})
@@ -56,7 +56,7 @@ def df_to_excel_sheet_autoformat(df, writer, sheetname):
             col_format = format_percentage
         i1 = xl_col_to_name(idx + 1)
         cols = "{0}:{0}".format(i1)
-        worksheet.set_column(cols, 10, col_format)
+        worksheet.set_column(cols, 15, col_format)
 
 
 def column_header_is_money(col_header):

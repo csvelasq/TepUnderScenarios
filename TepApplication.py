@@ -7,10 +7,16 @@ import logging
 from datetime import timedelta
 import pandas as pd
 from formlayout import fedit
+import time
+import locale
+import gurobipy
 
 
 class TepSolverWorkspace(object):
-    def __init__(self, workspace_dir=os.getcwd()):
+    default_nsga2_xlsxname = "ParetoFront_nsga2"  # format with current date
+    default_robustness_xlsxname = "RobustnessMeasure"  # format with current date
+
+    def __init__(self, workspace_dir):
         self.workspace_dir = workspace_dir
         self.tep_case_name = os.path.basename(self.workspace_dir)
         # the name of the current test case defaults to the same name of the containing folder
@@ -29,6 +35,7 @@ class TepSolverWorkspace(object):
         self.tep_pareto_solver = None  # type: tep.TepScenariosModel.ScenariosTepParetoFrontBuilder
         self.efficient_alternatives = []
         self.robustness_calculator = None
+
         logging.info("Successfully opened case '{0}' from path '{1}'".format(self.tep_case_name, self.workspace_dir))
 
     # region dirs and files functions
@@ -62,28 +69,21 @@ class TepSolverWorkspace(object):
         return os.path.isdir(workspace_dirpath) and \
                os.path.exists(os.path.join(workspace_dirpath, case_name + ".xlsx"))
 
-    @staticmethod
-    def open_workspace(workspace_path):
-        wp = workspace_path
-        while not TepSolverWorkspace.is_valid_workspace(wp):
-            wp = raw_input("Workspace '{0}' not valid, please insert new workspace: ".format(wp))
-        return TepSolverWorkspace(wp)
-
     # region pareto front functions
-    def open_pareto_front(self, suffix="_fullpareto.xlsx"):
-        pareto_excel_filename = self.from_relative_to_abs_path_results(self.instance_name + suffix)
+    def open_pareto_front(self, pareto_xlsx_filename):
+        pareto_excel_filename = self.from_relative_to_abs_path_results(pareto_xlsx_filename + ".xlsx")
         if not os.path.isfile(pareto_excel_filename):
-            # if provided suffix does not exist, default to NSGA-II generated front
-            pareto_excel_filename = self.from_relative_to_abs_path_results(self.instance_name + "_Nsga2-Pareto.xlsx")
-            if not os.path.isfile(pareto_excel_filename):
-                logging.error("Excel file '{}' for pareto front was not found.".format(pareto_excel_filename))
+            logging.error(("Pareto front could not be opened, "
+                           "Excel file '{}' was not found.").format(pareto_excel_filename))
+            return
         self.pareto_excel_filename = pareto_excel_filename
         df_pareto = pd.read_excel(self.pareto_excel_filename, sheetname="ParetoAlternatives")
         for index, row in df_pareto.iterrows():
-            # plan_id = row['Plan ID']
-            # plan = tep.StaticTePlan.from_id(self.tep_model, plan_id)
             plan = tep.StaticTePlan.from_str_repr(self.tep_model, row['Built Lines'])
             self.efficient_alternatives.append(plan)
+        logging.info("Successfully loaded {} efficient plans from '{}'.".
+                     format(len(self.efficient_alternatives), self.pareto_excel_filename)
+                     )
 
     def build_pareto_front_by_nsga2(self, initial_individuals=None, save_to_excel=True, plot_front=True):
         logging.info("Beginning construction of pareto front by NSGA-II")
@@ -95,7 +95,8 @@ class TepSolverWorkspace(object):
         self.efficient_alternatives = self.tep_pareto_solver.efficient_alternatives
         if save_to_excel:
             logging.info("Saving summary of pareto front to excel...")
-            self.save_pareto_front_to_excel(suffix="Nsga2-Pareto")
+            filename = Utils.append_today(TepSolverWorkspace.default_nsga2_xlsxname)
+            self.save_pareto_front_to_excel(filename)
         if plot_front:
             logging.info("Plotting pareto front...")
             self.plot_pareto_front()
@@ -115,12 +116,11 @@ class TepSolverWorkspace(object):
         logging.info("Done with pareto front")
         return self.tep_pareto_solver
 
-    def save_pareto_front_to_excel(self, open_upon_completion=True, suffix=""):
-        r = self.save_to_excel(self.tep_pareto_solver.to_excel,
-                               suffix + ".xlsx",
-                               open_upon_completion)
-        if r:
-            self.pareto_excel_filename = r  # If succesful, method returns the filename
+    def save_pareto_front_to_excel(self, filename, open_upon_completion=True):
+        save_result = self.save_to_excel(self.tep_pareto_solver.to_excel, filename + ".xlsx", open_upon_completion)
+        if save_result:
+            # If succesful, method returns the filename
+            self.pareto_excel_filename = save_result
             msg = "Save detailed solution for all {} efficient alternatives (y/n):".format(
                 len(self.efficient_alternatives))
             save_details_efficient = Utils.get_yesno_answer_console(message=msg, default_answer=True)
@@ -146,12 +146,43 @@ class TepSolverWorkspace(object):
 
     # endregion
 
+    # region tep functions
+    def solve_deterministic_tep(self, scenario):
+        logging.info("Proceeding to solve deterministic TEP model under scenario '{0}'. ".format(scenario))
+        tep_deterministic_model = tep.TepModelOneScenario(scenario,
+                                                          self.tep_model.tep_system,
+                                                          tep_model_params=self.tep_model.tep_scenarios_model_parameters)
+        min_total_cost = tep_deterministic_model.solve()
+        locale.setlocale(locale.LC_ALL, '')
+        logging.info(("Solved deterministic TEP model under scenario '{0}'. "
+                      "Total cost = {1}"
+                      ).format(scenario, locale.currency(min_total_cost))
+                     )
+
+        # Detailed model and solution
+        tep_deterministic_model.model.write(
+            r"C:\Users\cvelasquez\Google Drive\2016 Paper TEP IEEEGM2017\07 Casos de estudio\Python\IEEE24RTSv2\IEEE24RTSv2_Results\Grb_TEP{}.lp".format(
+                scenario))
+        tep_deterministic_model.model.write(
+            r"C:\Users\cvelasquez\Google Drive\2016 Paper TEP IEEEGM2017\07 Casos de estudio\Python\IEEE24RTSv2\IEEE24RTSv2_Results\Grb_TEP{}.sol".format(
+                scenario))
+        # Detailed opf results
+        # tep_results = tep.ScenarioOpfModelResults(tep_deterministic_model)
+        # self.save_to_excel(tep_results.to_excel, "OptimalPlan_{}_r.xlsx".format(scenario))
+
+        # Inspect optimal plan
+        optimal_plan = tep_deterministic_model.get_optimal_plan(self.tep_model)
+        self.inspect_transmission_plan(optimal_plan, "OptimalPlan_{}".format(scenario))
+
+    # endregion
+
     def calculate_robustness_measure(self):
         self.robustness_calculator = tep.SecondOrderRobustnessMeasureCalculator(self.efficient_alternatives)
         self.save_to_excel(self.robustness_calculator.to_excel,
-                           self.instance_name + "_RobustnessMeasure.xlsx", True)
+                           Utils.append_today(TepSolverWorkspace.default_robustness_xlsxname) + ".xlsx", True)
 
     def inspect_transmission_plan_from_str(self, built_lines_string):
+        logging.info("Inspecting transmission expansion plan '{}'".format(built_lines_string))
         plan = tep.StaticTePlan.from_str_repr(self.tep_model, built_lines_string)
         self.inspect_transmission_plan(plan)
 
@@ -174,6 +205,7 @@ class TepSolverConsoleApp(Cmd):
         self.intro = "Welcome to TEP solver console"
         self.tep_workspace = []  # type: TepSolverWorkspace
         self.open_workspace(workspace_path)
+        self.timing = True
 
     # region cmd overrides to raise exceptions
     def _cmdloop(self, intro=None):
@@ -249,8 +281,10 @@ class TepSolverConsoleApp(Cmd):
     # endregion
 
     def open_workspace(self, workspace_dir):
-        self.tep_workspace = TepSolverWorkspace.open_workspace(workspace_dir)
-        print "Opened workspace in path '{}'".format(workspace_dir)
+        if TepSolverWorkspace.is_valid_workspace(workspace_dir):
+            self.tep_workspace = TepSolverWorkspace(workspace_dir)
+        else:
+            print "Workspace '{0}' not valid.".format(workspace_dir)
 
     def do_open(self, workspace_dir):
         """open [workspace_dir]
@@ -267,18 +301,7 @@ class TepSolverConsoleApp(Cmd):
         Inspect details of a particular static transmission expansion plan under scenarios.
         Plan string is of the format 'TC1','TC3','TC34'"""
         built_lines_str = str(built_lines_string)
-        logging.info("Inspecting transmission expansion plan '{}'".format(built_lines_str))
         self.tep_workspace.inspect_transmission_plan_from_str(built_lines_str)
-
-    def do_open_pareto(self, args):
-        """open_pareto [instance_name]
-        Open the saved pareto front for the provided instance name (or default if None)"""
-        instance_name = raw_input('Instance name for saved pareto front [blank for default]: ')
-        self.tep_workspace.set_current_testcase_instance(instance_name)
-        self.tep_workspace.open_pareto_front()
-        logging.info("Successfully loaded {} efficient plans from instance {}.".
-                     format(len(self.tep_workspace.efficient_alternatives), self.tep_workspace.instance_name)
-                     )
 
     def do_nsga2(self, initial_plans):
         """nsga2 [initial_plans]
@@ -306,8 +329,34 @@ class TepSolverConsoleApp(Cmd):
                                             for s in initial_individuals_str_list)
         self.tep_workspace.build_pareto_front_by_nsga2(initial_individuals=initial_individuals_list)
 
-    def user_calculate_robustness_measure(self):
+    def do_open_pareto(self, filepath):
+        """open_pareto [filepath]
+        Open the saved pareto front from the provided excel filepath (or from default location if filepath=None)"""
+        if filepath == '':
+            # default filepath points to nsga2 generated front
+            filepath = Utils.append_today(TepSolverWorkspace.default_nsga2_xlsxname)
+        self.tep_workspace.open_pareto_front(filepath)
+
+    do_op = do_open_pareto
+
+    def do_calc_robustness(self, args):
+        """robustness [front_path]
+        Calculates the second order robustness measure for an available pareto front"""
         if self.tep_workspace.efficient_alternatives is None:
             print "No pareto front available, build or load the pareto front before attempting to calculate the robustness measure"
             return
         self.tep_workspace.calculate_robustness_measure()
+
+    do_cr = do_calc_robustness
+
+    def do_tep_one_scenario(self, scenario_name):
+        """tep_one_state [scenario_name]
+        Solves the transmission expansion planning problem for a single scenario
+        (given by scenario_name, or the first state found if state_name is empty)"""
+        scenario = self.tep_workspace.tep_model.tep_system.scenarios[0]  # defaults to first scenario
+        if scenario_name != '':
+            scenario = next(scenario for scenario in self.tep_workspace.tep_model.tep_system.scenarios
+                            if scenario.name == scenario_name)
+        self.tep_workspace.solve_deterministic_tep(scenario)
+
+    do_tep = do_tep_one_scenario

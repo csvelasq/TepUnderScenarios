@@ -22,7 +22,7 @@ class TepScenariosNsga2SolverParams(object):
     @staticmethod
     def import_from_excel(excel_filepath):
         ga_params = TepScenariosNsga2SolverParams()
-        dict_ga_params = Utils.excel_worksheet_to_dict(excel_filepath, 'TepParameters')
+        dict_ga_params = Utils.excel_worksheet_to_dict(excel_filepath, 'Parameters')
         for key, param_value in dict_ga_params.iteritems():
             if key.startswith('ga_params'):
                 param_name = key[key.find('.') + 1:]

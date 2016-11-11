@@ -1,5 +1,7 @@
 """Mixed independent utilities"""
 
+import time
+
 
 def get_utilization(output, max_capacity):
     return float("nan") if max_capacity == 0 else float(output) / max_capacity
@@ -26,3 +28,7 @@ def subset_to_id(s, subset):
 
 def subset_to_str(s, subset):
     return ''.join(('1' if l in subset else '0') for l in s)
+
+
+def append_today(s, time_format="%m%d%Y"):
+    return s + time.strftime(time_format)

@@ -46,7 +46,7 @@ class PowerSystemElementState(object):
         self.element = element
 
     def __str__(self):
-        return self.element.name
+        return self.element.name + "_" + self.system_state.name
 
 
 class NodeState(PowerSystemElementState):
@@ -70,9 +70,6 @@ class NodeState(PowerSystemElementState):
     def find_outgoing_lines_states(self):
         return (line_state for line_state in self.system_state.transmission_lines_states
                 if line_state.node_from_state == self)
-
-    def __str__(self):
-        return self.node.name
 
 
 class GeneratorState(PowerSystemElementState):

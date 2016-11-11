@@ -14,39 +14,44 @@ from datetime import timedelta
 import random
 
 
-class TepScenariosModelParameters(object):
+class TepModelParameters(object):
     def __init__(self, opf_model_params=opf.OpfModelParameters(),
-                 investment_costs_multiplier=1, operation_costs_multiplier=1):
-        # type: (double, double, opf.OpfModelParameters) -> None
+                 investment_costs_multiplier=1, operation_costs_multiplier=1,
+                 disjunctive_parameter=1e10):
         self.investment_costs_multiplier = investment_costs_multiplier
         self.operation_costs_multiplier = operation_costs_multiplier
+        self.disjunctive_parameter = disjunctive_parameter
         self.opf_model_params = opf_model_params
+
+    @staticmethod
+    def import_from_excel(excel_filepath):
+        dict_params = Utils.excel_worksheet_to_dict(excel_filepath, 'Parameters')
+        return TepModelParameters.import_from_dict(dict_params)
+
+    @staticmethod
+    def import_from_dict(dict_params):
+        tep_params = TepModelParameters()
+        for key, value in dict_params.iteritems():
+            if key.startswith('tep_params'):
+                opf_param_name = key[key.find('.') + 1:]
+                if opf_param_name == 'slack_bus_name' and isinstance(value, float):
+                    value = str(int(value))
+                setattr(tep_params, opf_param_name, value)
+        tep_params.opf_model_params = opf.OpfModelParameters.import_from_dict(dict_params)
+        return tep_params
 
 
 class TepScenariosModel(object):
     def __init__(self, tep_system,
-                 tep_scenarios_model_parameters=TepScenariosModelParameters()):
-        # type: (powersys.PowerSystemPlanning.PowerSystemTransmissionPlanning, TepScenariosModelParameters, gurobipy.Model) -> None
+                 tep_scenarios_model_parameters=TepModelParameters()):
+        # type: (powersys.PowerSystemPlanning.PowerSystemTransmissionPlanning, TepModelParameters, gurobipy.Model) -> None
         self.tep_system = tep_system  # type: PowerSystemPlanning.PowerSystemTransmissionPlanning
         self.tep_scenarios_model_parameters = tep_scenarios_model_parameters
 
     @staticmethod
     def import_from_excel(excel_filepath):
         imported_tep_system = pwsp.PowerSystemTransmissionPlanning.import_from_excel(excel_filepath)
-        params = Utils.excel_worksheet_to_dict(excel_filepath, 'TepParameters')
-        base_mva = 100 if 'base_mva' not in params.keys() else params['base_mva']
-        opf_model_params = opf.OpfModelParameters(load_shedding_cost=params['load_shedding_cost'],
-                                                  base_mva=base_mva)
-        for key, value in params.iteritems():
-            if key.startswith('opf_model_params'):
-                opf_param_name = key[key.find('.') + 1:]
-                if opf_param_name == 'slack_bus_name' and isinstance(value, float):
-                    value = str(int(value))
-                setattr(opf_model_params, opf_param_name, value)
-        tep_scenarios_model_parameters = \
-            TepScenariosModelParameters(opf_model_params,
-                                        investment_costs_multiplier=params['investment_costs_multiplier'],
-                                        operation_costs_multiplier=params['operation_costs_multiplier'])
+        tep_scenarios_model_parameters = TepModelParameters.import_from_excel(excel_filepath)
         imported_tep_model = TepScenariosModel(imported_tep_system, tep_scenarios_model_parameters)
         return imported_tep_model
 
@@ -381,6 +386,10 @@ class ScenariosTepParetoFrontBuilder(object):
 
 
 # TODO fix brute force solver
+# for enumeration:
+# indices=[2,3,2]
+# l=map(range,indices)
+# list(itertools.product(*l))
 class ScenariosTepParetoFrontByBruteForceParams(object):
     def __init__(self, save_extra_alternatives=False,
                  save_alternative_handle=None, save_alternative_handle_params=None,
@@ -545,3 +554,145 @@ class ScenariosTepParetoFrontByBruteForce(ScenariosTepParetoFrontBuilder):
                                       marker=dict(size=3, color='rgb(200,200,200)'),
                                       text=tags_dominated)
             self.data_plotly.append(trace_dominated)
+
+
+class TepModelOneState(opf.OpfModel):
+    """A MILP-based deterministic TEP model for a particular state of a power system.
+
+    Inheriting from opf.OpfModel allows using the summary class opf.OpfModelResults"""
+
+    def __init__(self, state, tep_system,
+                 line_investment_vars=None,
+                 tep_model_params=TepModelParameters(),
+                 model=grb.Model('')):
+        opf.OpfModel.__init__(self,
+                              state,
+                              opf_model_params=tep_model_params.opf_model_params,
+                              model=model)
+        self.tep_system = tep_system  # type: pwsp.PowerSystemTransmissionPlanning
+        self.tep_model_params = tep_model_params
+        # Model variables: line investment is the only new variable w/r to OPF
+        self.line_investment_vars = line_investment_vars
+        # Model constraints: power flow in candidate lines are the only two new constraints w/r to OPF
+        self.max_power_flow_candidates = {}
+        self.dc_power_flow_candidates = {}
+
+    def create_grb_vars(self):
+        super(TepModelOneState, self).create_grb_vars()
+        self.create_grb_vars_transmission_investment()
+
+    def create_grb_vars_transmission_investment(self):
+        if self.line_investment_vars is None:
+            # Create line investment variables if they weren't provided
+            self.line_investment_vars = {}
+            for candidate_line in self.candidate_lines_flat_list:
+                self.line_investment_vars[candidate_line] = \
+                    self.model.addVar(
+                        obj=candidate_line.investment_cost * self.tep_model_params.investment_costs_multiplier,
+                        vtype=grb.GRB.BINARY,
+                        name='y_{}'.format(candidate_line.transmission_line.name)
+                    )
+            self.model.update()  # Update model to integrate new variables
+
+    def create_grb_constraints(self):
+        super(TepModelOneState, self).create_grb_constraints()
+        self.create_grb_constraints_dc_power_flow_disjunctive()
+
+    def create_grb_constraints_dc_power_flow(self, transmission_lines_states=None):
+        """Creates DC power flow constraints in terms of bus angles
+
+        :param transmission_lines_states: A subset of the transmission lines for which the constraints will be generated. If None, the constraints will be generated for all transmission lines states in the model
+        :return: None
+        """
+        if transmission_lines_states is None:
+            transmission_lines_states = (line_state for line_state in self.state.transmission_lines_states
+                                         if not
+                                         self.tep_system.transmission_line_is_candidate(line_state.transmission_line))
+        super(TepModelOneState, self).create_grb_constraints_dc_power_flow(
+            transmission_lines_states=transmission_lines_states)
+
+    def create_grb_constraints_dc_power_flow_disjunctive(self, transmission_lines_states=None):
+        """Creates disjunctive DC power flow constraints in terms of bus angles
+
+        :param transmission_lines_states: A subset of the transmission lines for which the constraints will be generated. If None, the constraints will be generated for all transmission lines states in the model
+        :return: None
+        """
+        # TODO Angular difference among bus pairs is not enforced for these new lines
+        if transmission_lines_states is None:
+            transmission_lines_states = (line_state for line_state in self.state.transmission_lines_states
+                                         if
+                                         self.tep_system.transmission_line_is_candidate(line_state.transmission_line))
+        for line_state in transmission_lines_states:
+            bus_angle_from = self.bus_angle[line_state.node_from_state]
+            bus_angle_to = self.bus_angle[line_state.node_to_state]
+            # unavailable transmission lines are deactivated but included in the model
+            susceptance = line_state.isavailable * line_state.transmission_line.susceptance * self.opf_model_params.base_mva
+            lhs = self.power_flow[line_state] - susceptance * (bus_angle_from - bus_angle_to)
+            candidate_line_investment_var = next(line_var for key, line_var in self.line_investment_vars.iteritems()
+                                                 if key.transmission_line == line_state.transmission_line)
+            rhs = self.tep_model_params.disjunctive_parameter * (1 - candidate_line_investment_var)
+            self.dc_power_flow_candidates[line_state] = \
+                self.create_grb_abs_constraint_pair(lhs, rhs, name='DCFlowDisj{}'.format(line_state))
+            # max power flow binary formulation
+            self.max_power_flow_candidates[line_state] = \
+                self.create_grb_abs_constraint_pair(
+                    self.power_flow[line_state],
+                    line_state.transmission_line.thermal_capacity * candidate_line_investment_var,
+                    name='MaxFlow{}'.format(line_state)
+                )
+
+    def get_investment_vars_value(self):
+        return self.get_grb_vars_solution(self.line_investment_vars)
+
+
+class TepModelOneScenario(opf.ScenarioOpfModel):
+    """A MILP-based deterministic TEP model for a particular scenario of a power system.
+    A scenario is understood as a static collection of power system states
+    (for example, hourly states for a full year under some set of assumptions)
+
+    Inheriting from opf.ScenarioOpfModel allows using the summary class opf.ScenarioOpfModelResults"""
+
+    def __init__(self, scenario,
+                 tep_system,
+                 line_investment_vars=None,
+                 tep_model_params=TepModelParameters(),
+                 model=grb.Model('')):
+        # type: (powersys.PowerSystemScenario.PowerSystemScenario, OpfModelParameters, gurobipy.Model) -> None
+        opf.ScenarioOpfModel.__init__(self, scenario,
+                                      opf_model_params=tep_model_params.opf_model_params,
+                                      model=model)
+        self.tep_system = tep_system
+        self.tep_model_params = tep_model_params
+        # Line investment variables
+        self.line_investment_vars = line_investment_vars
+
+    def build_model(self):
+        if self.line_investment_vars is None:
+            # Create line investment variables if they weren't provided
+            self.line_investment_vars = {}
+            for candidate_line in self.tep_system.candidate_lines_flat_list:
+                self.line_investment_vars[candidate_line] = \
+                    self.model.addVar(
+                        obj=candidate_line.investment_cost * self.tep_model_params.investment_costs_multiplier,
+                        vtype=grb.GRB.BINARY,
+                        name='y_{}'.format(candidate_line.transmission_line.name)
+                    )
+            self.model.update()  # Update model to integrate new variables
+        super(TepModelOneScenario, self).build_model()
+
+    def build_opf_model_one_state(self, state):
+        """Overrides base method in order to minimize code modifications
+        (this method will be called by opf.ScenarioOpfModel.__init__)"""
+        tep_model = TepModelOneState(state, self.tep_system,
+                                     line_investment_vars=self.line_investment_vars,
+                                     tep_model_params=self.tep_model_params,
+                                     model=self.model)
+        tep_model.build_model()
+        return tep_model
+
+    def get_optimal_plan(self, tep_model):
+        investment_vars_value = self.get_grb_vars_solution(self.line_investment_vars)
+        built_lines = list(candidate_line for candidate_line in self.tep_system.candidate_lines_flat_list
+                           if investment_vars_value[candidate_line])
+        plan = StaticTePlan(tep_model, built_lines)
+        return plan

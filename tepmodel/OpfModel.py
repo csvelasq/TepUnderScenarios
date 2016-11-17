@@ -23,7 +23,7 @@ class OpfModelParameters(object):
         self.bus_angle_max = bus_angle_max
         self.bus_angle_max_difference = bus_angle_max_difference
         self.obj_func_multiplier = obj_func_multiplier
-        self.grb_opt_params = grb_opt_params
+        self.grb_opt_params = grb_opt_params  # type: mygrb.GrbOptParameters
 
     @staticmethod
     def import_from_dict(dict_params):
@@ -53,6 +53,7 @@ class OpfModel(mygrb.GrbOptModel):
         if self.opf_model_params.slack_bus_name is not None:
             self.slack_bus = self.state.find_node_state_by_name(self.opf_model_params.slack_bus_name)
         # Model variables
+        self.operation_cost = {}
         self.pgen = {}
         self.load_shed = {}
         self.bus_angle = {}
@@ -60,6 +61,7 @@ class OpfModel(mygrb.GrbOptModel):
         # Model constraints
         self.nodal_power_balance = {}
         self.dc_power_flow = {}
+        self.operation_cost_definition = {}
 
     def build_model(self):
         # build gurobi model
@@ -69,13 +71,14 @@ class OpfModel(mygrb.GrbOptModel):
         self.create_grb_constraints()
 
     def create_grb_vars(self):
+        # Total operation cost variable
+        self.operation_cost = self.model.addVar(lb=0, obj=1, name='OpCost{}'.format(self.state))
         # Create nodal variables: load_shed and bus_angle
         for node_state in self.state.node_states:
             # variables are created even if a node has no load
-            lshed_obj = self.opf_model_params.load_shedding_cost * self.state.duration
             self.load_shed[node_state] = self.model.addVar(lb=0,
                                                            ub=node_state.load_state,
-                                                           obj=lshed_obj * self.opf_model_params.obj_func_multiplier,
+                                                           # obj=self.opf_model_params.load_shedding_cost * self.state.duration * self.opf_model_params.obj_func_multiplier,
                                                            name='Ls{0}'.format(node_state))
             if node_state == self.slack_bus:
                 self.bus_angle[node_state] = self.model.addVar(lb=0,
@@ -89,10 +92,9 @@ class OpfModel(mygrb.GrbOptModel):
                                                                name='Ang{}'.format(node_state))
         # Create generator variables: pgen
         for generator_state in self.state.generators_states:
-            pgen_obj = generator_state.generation_marginal_cost * self.state.duration
             self.pgen[generator_state] = self.model.addVar(lb=0,
                                                            ub=generator_state.available_generating_capacity,
-                                                           obj=pgen_obj * self.opf_model_params.obj_func_multiplier,
+                                                           # obj=generator_state.generation_marginal_cost * self.state.duration * self.opf_model_params.obj_func_multiplier,
                                                            name='Pg{0}'.format(generator_state))
         # Create line variables: power_flow
         for line_state in self.state.transmission_lines_states:
@@ -106,6 +108,17 @@ class OpfModel(mygrb.GrbOptModel):
     def create_grb_constraints(self):
         self.create_grb_constraints_nodal_power_balance()
         self.create_grb_constraints_dc_power_flow()
+        self.create_grb_constraint_cost_definition()
+
+    def create_grb_constraint_cost_definition(self):
+        rhs_expr = sum(self.pgen[generator_state] * generator_state.generation_marginal_cost * self.state.duration
+                       for generator_state in self.state.generators_states)
+        rhs_expr += sum(self.load_shed.values()) * self.opf_model_params.load_shedding_cost * self.state.duration
+        rhs_expr *= self.opf_model_params.obj_func_multiplier
+        self.operation_cost_definition = self.model.addConstr(lhs=self.operation_cost,
+                                                              sense=grb.GRB.EQUAL,
+                                                              rhs=rhs_expr,
+                                                              name='OpCostDef{}'.format(self.state))
 
     def create_grb_constraints_nodal_power_balance(self):
         for node_state in self.state.node_states:
@@ -151,6 +164,10 @@ class OpfModel(mygrb.GrbOptModel):
                                                         rhs=self.opf_model_params.bus_angle_max_difference,
                                                         name='AngleDiff')
 
+    def solve(self):
+        obj_val = super(OpfModel, self).solve()
+        return obj_val
+
     def get_lmps(self):
         """Calculates nodal spot prices for the solution in this opf"""
         assert self.is_solved_to_optimality()
@@ -162,6 +179,9 @@ class OpfModel(mygrb.GrbOptModel):
         for key, val in shadow_prices.iteritems():
             shadow_prices[key] = val / (self.opf_model_params.obj_func_multiplier * self.state.duration)
         return shadow_prices
+
+    def get_total_load_shed(self):
+        return sum(self.get_grb_vars_solution(self.load_shed).values()) * self.state.duration
 
 
 class OpfModelResults(object):
@@ -363,7 +383,7 @@ class ScenarioOpfModel(mygrb.GrbOptModel):
     (for example, hourly states for a full year under some set of assumptions)"""
 
     def __init__(self, scenario, opf_model_params=OpfModelParameters(),
-                 model=grb.Model('')):
+                 model=None):
         # type: (powersys.PowerSystemScenario.PowerSystemScenario, OpfModelParameters, gurobipy.Model) -> None
         mygrb.GrbOptModel.__init__(self, model)
         self.scenario = scenario
@@ -382,6 +402,14 @@ class ScenarioOpfModel(mygrb.GrbOptModel):
         opf_model = OpfModel(state, self.opf_model_params, self.model)
         opf_model.build_model()
         return opf_model
+
+    def solve(self):
+        obj_val = super(ScenarioOpfModel, self).solve()
+        return obj_val
+
+    def get_total_load_shed(self):
+        return sum(self.opf_models[state].get_total_load_shed()
+                   for state in self.scenario.states)
 
 
 class ScenarioOpfModelResults(object):
@@ -467,19 +495,30 @@ class ScenariosOpfModel(object):
         # type: (list[powersys.PowerSystemScenario.PowerSystemScenario], OpfModelParameters) -> None
         self.scenarios = scenarios
         self.opf_model_params = opf_model_params
-        # Build independent simulation models for each scenario
+        # independent simulation models for each scenario
         self.model_each_scenario = dict()
-        for scenario in self.scenarios:
-            self.model_each_scenario[scenario] = ScenarioOpfModel(scenario, self.opf_model_params, model=grb.Model(''))
         self.operation_costs_scenarios = collections.OrderedDict()
+        self.total_load_shed = {}
+        self.model_is_built = False
+
+    def build_model(self):
+        for scenario in self.scenarios:
+            self.build_model_one_scenario(scenario)
+        self.model_is_built = True
+
+    def build_model_one_scenario(self, scenario):
+        self.model_each_scenario[scenario] = ScenarioOpfModel(scenario, self.opf_model_params, model=grb.Model(''))
 
     def solve(self):
         """Simulates the optimal operation for each scenario
 
         :return: A dictionary with the minimum operation cost under each scenario
         """
+        if not self.model_is_built:
+            self.build_model()
         for scenario in self.scenarios:
             self.operation_costs_scenarios[scenario] = self.model_each_scenario[scenario].solve()
+            self.total_load_shed[scenario] = self.model_each_scenario[scenario].get_total_load_shed()
         return self.operation_costs_scenarios
 
 

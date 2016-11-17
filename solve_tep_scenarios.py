@@ -20,8 +20,8 @@ if __name__ == '__main__':
     # set this to a default; if it doesn't exist, I will ask for another directory
     default_workspace_master_path = r"C:\Users\cvelasquez\Google Drive\2016 Paper TEP IEEEGM2017\07 Casos de estudio\Python"
     # default_case = "Validation30bus"
-    # default_case = "Garver6"
-    default_case = "IEEE24RTSv2"
+    default_case = "Garver6v2"
+    # default_case = "IEEE24RTSv2"
     workspace_path = os.path.join(default_workspace_master_path, default_case)
     console_tep_app = TepSolverConsoleApp(workspace_path)
     console_tep_app.cmdloop()

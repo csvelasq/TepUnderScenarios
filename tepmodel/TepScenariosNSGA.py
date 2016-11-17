@@ -196,12 +196,6 @@ class TepScenariosNsga2Solver(TepScenariosModel.ScenariosTepParetoFrontBuilder):
         self.efficient_alternatives = [TepScenariosModel.StaticTePlan.from_integer_gene(self.tep_model, ind)
                                        for ind in self.pareto_pop]
         self.efficient_alternatives.sort(key=lambda a: a.total_costs[self.tep_model.tep_system.scenarios[0]])
-        # Set optimal plan for each scenario
-        for alternative in self.efficient_alternatives:
-            for scenario in self.tep_model.tep_system.scenarios:
-                if self.optimal_plans[scenario] is None \
-                        or alternative.total_costs[scenario] < self.optimal_plans[scenario].total_costs[scenario]:
-                    self.optimal_plans[scenario] = alternative
         return self.efficient_alternatives
 
     def i_have_valid_population(self):

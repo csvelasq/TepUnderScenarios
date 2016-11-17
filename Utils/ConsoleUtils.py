@@ -1,4 +1,5 @@
 import DataUtils
+import locale
 
 
 def get_yesno_answer_console(message="Proceed (y/n)?: ", default_answer=True):
@@ -61,3 +62,8 @@ def print_scalar_attributes_to_console(obj_instance):
     """Prints all scalar attributes (i.e. of type int, float or str) of obj_instance to console"""
     for key, val in DataUtils.get_scalar_attributes(obj_instance).iteritems():
         print "{0}: {1}".format(key, val)
+
+
+def currency_to_str(number):
+    locale.setlocale(locale.LC_ALL, '')
+    return locale.currency(number)

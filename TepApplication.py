@@ -9,12 +9,13 @@ import pandas as pd
 from formlayout import fedit
 import time
 import locale
-import gurobipy
+import gurobipy as grb
 
 
 class TepSolverWorkspace(object):
     default_nsga2_xlsxname = "ParetoFront_nsga2"  # format with current date
     default_robustness_xlsxname = "RobustnessMeasure"  # format with current date
+    default_stepfront_xlsxname = "ParetoFront_step"  # format with current date
 
     def __init__(self, workspace_dir):
         self.workspace_dir = workspace_dir
@@ -27,6 +28,8 @@ class TepSolverWorkspace(object):
         self.results_folder = self.from_relative_to_abs_path(self.tep_case_name + "_Results")
         if not os.path.isdir(self.results_folder):
             os.mkdir(self.results_folder)
+        self.tep_model.tep_scenarios_model_parameters.opf_model_params.grb_opt_params.dump_filepath = self.from_relative_to_abs_path_results(
+            "")
 
         # pareto solver
         self.ga_params = tep.TepScenariosNsga2SolverParams.import_from_excel(self.tep_case_filepath)
@@ -60,6 +63,10 @@ class TepSolverWorkspace(object):
             if open_upon_completion:
                 os.system('start excel.exe "%s"' % (my_filename,))
             return my_filename
+
+    def write_model_and_solution(self, grb_model):
+        grb_model.write(self.from_relative_to_abs_path_results(grb_model.model_name + '.lp'))
+        grb_model.write(self.from_relative_to_abs_path_results(grb_model.model_name + '.sol'))
 
     # endregion
 
@@ -116,23 +123,39 @@ class TepSolverWorkspace(object):
         logging.info("Done with pareto front")
         return self.tep_pareto_solver
 
+    # TODO merge pareto front building functions (extract common code)
+    def build_pareto_front_by_step(self, save_to_excel=True, plot_front=True, probability_steps=5):
+        logging.info(
+            "Beginning construction of pareto front by stochastic TEP, with {} steps".format(probability_steps))
+        self.tep_pareto_solver = tep.ScenariosTepStochasticParetoFrontBuilder(self.tep_model,
+                                                                              probability_steps=probability_steps)  # type: tep.ScenariosTepStochasticParetoFrontBuilder
+        self.tep_pareto_solver.execute_build_pareto_front()
+        self.efficient_alternatives = self.tep_pareto_solver.efficient_alternatives
+        if save_to_excel:
+            logging.info("Saving summary of pareto front to excel...")
+            filename = Utils.append_today(TepSolverWorkspace.default_stepfront_xlsxname)
+            self.save_pareto_front_to_excel(filename)
+        if plot_front:
+            logging.info("Plotting pareto front...")
+            self.plot_pareto_front()
+        logging.info("Done with pareto front")
+        return self.tep_pareto_solver
+
     def save_pareto_front_to_excel(self, filename, open_upon_completion=True):
         save_result = self.save_to_excel(self.tep_pareto_solver.to_excel, filename + ".xlsx", open_upon_completion)
         if save_result:
             # If succesful, method returns the filename
             self.pareto_excel_filename = save_result
-            msg = "Save detailed solution for all {} efficient alternatives (y/n):".format(
-                len(self.efficient_alternatives))
-            save_details_efficient = Utils.get_yesno_answer_console(message=msg, default_answer=True)
-            if save_details_efficient:
-                for idx, eff_alt in enumerate(self.efficient_alternatives):
-                    plan_name = "Plan{}".format(idx)
-                    eff_alt_details = tep.StaticTePlanDetails(eff_alt, plan_name=plan_name)
-                    plan_details_excel_path = self.from_relative_to_abs_path_results(
-                        '{0}_Details.xlsx'.format(plan_name))
-                    saved_successfully = Utils.try_save_file(plan_details_excel_path, eff_alt_details.to_excel)
-                    if not saved_successfully:
-                        logging.info("Details for plan {} were not saved".format(idx))
+
+    def save_details_efficient_alternatives(self):
+        for idx, eff_alt in enumerate(self.efficient_alternatives):
+            plan_name = "Plan{}".format(idx)
+            eff_alt_details = tep.StaticTePlanDetails(eff_alt, plan_name=plan_name)
+            plan_details_excel_path = self.from_relative_to_abs_path_results(
+                '{0}_Details.xlsx'.format(plan_name))
+            saved_successfully = Utils.try_save_file(plan_details_excel_path, eff_alt_details.to_excel)
+            if not saved_successfully:
+                logging.info("Details for plan {} were not saved".format(idx))
 
     def plot_pareto_front(self, suffix="ParetoFrontPlot_nsga2"):
         scen_num = len(self.tep_model.tep_system.scenarios)
@@ -149,30 +172,32 @@ class TepSolverWorkspace(object):
     # region tep functions
     def solve_deterministic_tep(self, scenario):
         logging.info("Proceeding to solve deterministic TEP model under scenario '{0}'. ".format(scenario))
-        tep_deterministic_model = tep.TepModelOneScenario(scenario,
-                                                          self.tep_model.tep_system,
-                                                          tep_model_params=self.tep_model.tep_scenarios_model_parameters)
+        tep_deterministic_model = tep.TepModelOneScenario(scenario, self.tep_model,
+                                                          model=grb.Model('Tep{}'.format(scenario)))
         min_total_cost = tep_deterministic_model.solve()
         locale.setlocale(locale.LC_ALL, '')
-        logging.info(("Solved deterministic TEP model under scenario '{0}'. "
+        logging.info(("Solved deterministic TEP model under scenario '{0}' (runtime: {2}). "
                       "Total cost = {1}"
-                      ).format(scenario, locale.currency(min_total_cost))
+                      ).format(scenario, locale.currency(min_total_cost), tep_deterministic_model.model.Runtime)
                      )
-
         # Detailed model and solution
-        tep_deterministic_model.model.write(
-            r"C:\Users\cvelasquez\Google Drive\2016 Paper TEP IEEEGM2017\07 Casos de estudio\Python\IEEE24RTSv2\IEEE24RTSv2_Results\Grb_TEP{}.lp".format(
-                scenario))
-        tep_deterministic_model.model.write(
-            r"C:\Users\cvelasquez\Google Drive\2016 Paper TEP IEEEGM2017\07 Casos de estudio\Python\IEEE24RTSv2\IEEE24RTSv2_Results\Grb_TEP{}.sol".format(
-                scenario))
+        self.write_model_and_solution(tep_deterministic_model.model)
         # Detailed opf results
-        # tep_results = tep.ScenarioOpfModelResults(tep_deterministic_model)
+        # tep_results = tep.TepModelOneScenarioResults(tep_deterministic_model)
         # self.save_to_excel(tep_results.to_excel, "OptimalPlan_{}_r.xlsx".format(scenario))
-
-        # Inspect optimal plan
-        optimal_plan = tep_deterministic_model.get_optimal_plan(self.tep_model)
+        # Inspect optimal plan (results coincide with previous results)
+        optimal_plan = tep_deterministic_model.get_optimal_plan()
         self.inspect_transmission_plan(optimal_plan, "OptimalPlan_{}".format(scenario))
+
+    def solve_stochastic_tep(self, probabilities):
+        tep_stochastic_model = tep.TepStochasticModel(self.tep_model,
+                                                      scenario_probabilities=probabilities)
+        min_expected_cost = tep_stochastic_model.solve()
+        # Detailed model and solution
+        self.write_model_and_solution(tep_stochastic_model.model)
+        # Inspect optimal plan
+        optimal_plan = tep_stochastic_model.get_optimal_plan()
+        self.inspect_transmission_plan(optimal_plan, "OptimalPlan_step")
 
     # endregion
 
@@ -206,79 +231,8 @@ class TepSolverConsoleApp(Cmd):
         self.tep_workspace = []  # type: TepSolverWorkspace
         self.open_workspace(workspace_path)
         self.timing = True
-
-    # region cmd overrides to raise exceptions
-    def _cmdloop(self, intro=None):
-        """Repeatedly issue a prompt, accept input, parse an initial prefix
-        off the received input, and dispatch to action methods, passing them
-        the remainder of the line as argument.
-        """
-
-        # An almost perfect copy from Cmd; however, the pseudo_raw_input portion
-        # has been split out so that it can be called separately
-
-        self.preloop()
-        if self.use_rawinput and self.completekey:
-            try:
-                import readline
-                self.old_completer = readline.get_completer()
-                readline.set_completer(self.complete)
-                readline.parse_and_bind(self.completekey + ": complete")
-            except ImportError:
-                pass
-        try:
-            if intro is not None:
-                self.intro = intro
-            if self.intro:
-                self.stdout.write(str(self.intro) + "\n")
-            stop = None
-            while not stop:
-                if self.cmdqueue:
-                    line = self.cmdqueue.pop(0)
-                else:
-                    line = self.pseudo_raw_input(self.prompt)
-                if (self.echo) and (isinstance(self.stdin, file)):
-                    self.stdout.write(line + '\n')
-                stop = self.onecmd_plus_hooks(line)
-            self.postloop()
-        except:
-            raise
-        if self.use_rawinput and self.completekey:
-            try:
-                import readline
-                readline.set_completer(self.old_completer)
-            except ImportError:
-                pass
-        return stop
-
-    def onecmd_plus_hooks(self, line):
-        # The outermost level of try/finally nesting can be condensed once
-        # Python 2.4 support can be dropped.
-        stop = 0
-        try:
-            statement = self.complete_statement(line)
-            (stop, statement) = self.postparsing_precmd(statement)
-            if stop:
-                return self.postparsing_postcmd(stop)
-            if statement.parsed.command not in self.excludeFromHistory:
-                self.history.append(statement.parsed.raw)
-            try:
-                self.redirect_output(statement)
-                timestart = datetime.datetime.now()
-                statement = self.precmd(statement)
-                stop = self.onecmd(statement)
-                stop = self.postcmd(stop, statement)
-                if self.timing:
-                    self.pfeedback('Elapsed: %s' % str(datetime.datetime.now() - timestart))
-            finally:
-                self.restore_output(statement)
-        except EmptyStatement:
-            return 0
-        except:
-            raise
-        return self.postparsing_postcmd(stop)
-
-    # endregion
+        self.debug = True
+        self.abbrev = False
 
     def open_workspace(self, workspace_dir):
         if TepSolverWorkspace.is_valid_workspace(workspace_dir):
@@ -339,6 +293,14 @@ class TepSolverConsoleApp(Cmd):
 
     do_op = do_open_pareto
 
+    def do_save_efficient(self, args):
+        """save_efficient
+        Saves detailed excel files for each efficient alternative currently available"""
+        if len(self.tep_workspace.efficient_alternatives) == 0:
+            print "No efficient alternatives available to summarize. Build efficient alternatives first."
+        else:
+            self.tep_workspace.save_details_efficient_alternatives()
+
     def do_calc_robustness(self, args):
         """robustness [front_path]
         Calculates the second order robustness measure for an available pareto front"""
@@ -349,14 +311,38 @@ class TepSolverConsoleApp(Cmd):
 
     do_cr = do_calc_robustness
 
-    def do_tep_one_scenario(self, scenario_name):
-        """tep_one_state [scenario_name]
-        Solves the transmission expansion planning problem for a single scenario
-        (given by scenario_name, or the first state found if state_name is empty)"""
-        scenario = self.tep_workspace.tep_model.tep_system.scenarios[0]  # defaults to first scenario
+    def do_tep(self, scenario_name):
+        """tep [scenario_name]
+        Solves the transmission expansion planning problem for a single scenario (given by scenario_name)
+        If no scenario is specified, all scenarios are solved"""
+        scenarios = self.tep_workspace.tep_model.tep_system.scenarios
         if scenario_name != '':
-            scenario = next(scenario for scenario in self.tep_workspace.tep_model.tep_system.scenarios
-                            if scenario.name == scenario_name)
-        self.tep_workspace.solve_deterministic_tep(scenario)
+            scenarios = [scenario for scenario in self.tep_workspace.tep_model.tep_system.scenarios
+                         if scenario.name == scenario_name]
+        for scenario in scenarios:
+            self.tep_workspace.solve_deterministic_tep(scenario)
 
-    do_tep = do_tep_one_scenario
+    def do_step(self, probabilities):
+        """step [probabilities]
+        Solves the stochastic TEP optimization model,
+        using the provided probabilities in defining expected cost (e.g. probabilities='[0.4, 0.6]').
+        If no probabilities are provided, equally-likely scenarios are assumed"""
+        scenario_probabilities = None
+        if probabilities:
+            scenario_probabilities = [float(p) for p in probabilities.strip('[] ').split(',')]
+            scenario_probabilities = dict(zip(self.tep_workspace.tep_model.tep_system.scenarios,
+                                              scenario_probabilities))
+        self.tep_workspace.solve_stochastic_tep(scenario_probabilities)
+
+    def do_quickrtep(self, probability_steps):
+        """quickrtep [probability_steps]
+        Quickly builds convex Pareto front (by stochastic TEP) and then calculates robustness measure
+        'probability_steps' is the number of step on the grid built to explore all possible scenario probabilities (defaults to 5)"""
+        if not probability_steps:
+            probability_steps = 5
+        else:
+            probability_steps = int(probability_steps)
+        self.tep_workspace.build_pareto_front_by_step(save_to_excel=True, plot_front=True,
+                                                      probability_steps=probability_steps)
+
+    do_rtep = do_quickrtep

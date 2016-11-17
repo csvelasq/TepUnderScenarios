@@ -12,8 +12,11 @@ import logging
 import time
 from datetime import timedelta
 import random
+import numpy as np
+import locale
 
 
+# TEP MODEL ###########################################################################################
 class TepModelParameters(object):
     def __init__(self, opf_model_params=opf.OpfModelParameters(),
                  investment_costs_multiplier=1, operation_costs_multiplier=1,
@@ -211,15 +214,7 @@ class StaticTePlan(object):
 
     def is_equivalent(self, other_plan):
         # type: (StaticTePlan) -> bool
-        candidate_lines = self.tep_model.tep_system.candidate_lines
-        for lines_group in pwsp.PowerSystemTransmissionPlanning.get_sets_of_equivalent_lines_idx(candidate_lines):
-            number_of_built_lines_in_group_self = sum((candidate_lines[i] in self.candidate_lines_built)
-                                                      for i in lines_group)
-            number_of_built_lines_in_group_other = sum((candidate_lines[i] in other_plan.candidate_lines_built)
-                                                       for i in lines_group)
-            if number_of_built_lines_in_group_self != number_of_built_lines_in_group_other:
-                return False
-        return True
+        return self.to_integer_gene() == other_plan.to_integer_gene()
 
 
 class StaticTePlanDetails(object):
@@ -256,6 +251,7 @@ class StaticTePlanDetails(object):
         self.scenarios_results.to_excel_sheets(writer, recursive=True)
 
 
+# PARETO FRONT ###########################################################################################
 class ScenariosTepParetoFrontBuilder(object):
     def __init__(self, tep_model):
         # type: (TepScenariosModel) -> None
@@ -281,6 +277,7 @@ class ScenariosTepParetoFrontBuilder(object):
     def execute_build_pareto_front(self):
         self.start_time = time.clock()
         self.build_pareto_front()
+        self.identify_optimal_deterministic_plans()
         self.elapsed_seconds = time.clock() - self.start_time
         logging.info(("Finished building pareto front (elapsed={}): {} efficient alternatives were found. "
                       "Proceeding to summarize results...").
@@ -291,6 +288,14 @@ class ScenariosTepParetoFrontBuilder(object):
     def build_pareto_front(self):
         # type: () -> List[StaticTePlan]
         pass
+
+    def identify_optimal_deterministic_plans(self):
+        # Set optimal plan for each scenario
+        for alternative in self.efficient_alternatives:
+            for scenario in self.tep_model.tep_system.scenarios:
+                if self.optimal_plans[scenario] is None \
+                        or alternative.total_costs[scenario] < self.optimal_plans[scenario].total_costs[scenario]:
+                    self.optimal_plans[scenario] = alternative
 
     def summarize(self):
         self.summary_pareto_front['Elapsed time'] = str(timedelta(seconds=self.elapsed_seconds))
@@ -556,21 +561,20 @@ class ScenariosTepParetoFrontByBruteForce(ScenariosTepParetoFrontBuilder):
             self.data_plotly.append(trace_dominated)
 
 
+# TEP OPTIMIZATION ###########################################################################################
 class TepModelOneState(opf.OpfModel):
     """A MILP-based deterministic TEP model for a particular state of a power system.
 
     Inheriting from opf.OpfModel allows using the summary class opf.OpfModelResults"""
 
-    def __init__(self, state, tep_system,
+    def __init__(self, state, tep_model,
                  line_investment_vars=None,
-                 tep_model_params=TepModelParameters(),
                  model=grb.Model('')):
         opf.OpfModel.__init__(self,
                               state,
-                              opf_model_params=tep_model_params.opf_model_params,
+                              opf_model_params=tep_model.tep_scenarios_model_parameters.opf_model_params,
                               model=model)
-        self.tep_system = tep_system  # type: pwsp.PowerSystemTransmissionPlanning
-        self.tep_model_params = tep_model_params
+        self.tep_model = tep_model  # type: tep.TepScenariosModel
         # Model variables: line investment is the only new variable w/r to OPF
         self.line_investment_vars = line_investment_vars
         # Model constraints: power flow in candidate lines are the only two new constraints w/r to OPF
@@ -581,18 +585,24 @@ class TepModelOneState(opf.OpfModel):
         super(TepModelOneState, self).create_grb_vars()
         self.create_grb_vars_transmission_investment()
 
+    @staticmethod
+    def create_new_tx_investment_vars(tep_model, model):
+        line_investment_vars = {}
+        for candidate_line in tep_model.tep_system.candidate_lines_flat_list:
+            line_investment_vars[candidate_line] = \
+                model.addVar(
+                    obj=candidate_line.investment_cost * tep_model.tep_scenarios_model_parameters.investment_costs_multiplier,
+                    vtype=grb.GRB.BINARY,
+                    name='y_{}'.format(candidate_line.transmission_line.name)
+                )
+        model.update()  # Update model to integrate new variables
+        return line_investment_vars
+
     def create_grb_vars_transmission_investment(self):
         if self.line_investment_vars is None:
             # Create line investment variables if they weren't provided
-            self.line_investment_vars = {}
-            for candidate_line in self.candidate_lines_flat_list:
-                self.line_investment_vars[candidate_line] = \
-                    self.model.addVar(
-                        obj=candidate_line.investment_cost * self.tep_model_params.investment_costs_multiplier,
-                        vtype=grb.GRB.BINARY,
-                        name='y_{}'.format(candidate_line.transmission_line.name)
-                    )
-            self.model.update()  # Update model to integrate new variables
+            self.line_investment_vars = TepModelOneState.create_new_tx_investment_vars(
+                self.tep_model.tep_system.candidate_lines_flat_list, self.model, self.tep_model.tep_model_params)
 
     def create_grb_constraints(self):
         super(TepModelOneState, self).create_grb_constraints()
@@ -607,7 +617,8 @@ class TepModelOneState(opf.OpfModel):
         if transmission_lines_states is None:
             transmission_lines_states = (line_state for line_state in self.state.transmission_lines_states
                                          if not
-                                         self.tep_system.transmission_line_is_candidate(line_state.transmission_line))
+                                         self.tep_model.tep_system.transmission_line_is_candidate(
+                                             line_state.transmission_line))
         super(TepModelOneState, self).create_grb_constraints_dc_power_flow(
             transmission_lines_states=transmission_lines_states)
 
@@ -621,7 +632,8 @@ class TepModelOneState(opf.OpfModel):
         if transmission_lines_states is None:
             transmission_lines_states = (line_state for line_state in self.state.transmission_lines_states
                                          if
-                                         self.tep_system.transmission_line_is_candidate(line_state.transmission_line))
+                                         self.tep_model.tep_system.transmission_line_is_candidate(
+                                             line_state.transmission_line))
         for line_state in transmission_lines_states:
             bus_angle_from = self.bus_angle[line_state.node_from_state]
             bus_angle_to = self.bus_angle[line_state.node_to_state]
@@ -630,7 +642,8 @@ class TepModelOneState(opf.OpfModel):
             lhs = self.power_flow[line_state] - susceptance * (bus_angle_from - bus_angle_to)
             candidate_line_investment_var = next(line_var for key, line_var in self.line_investment_vars.iteritems()
                                                  if key.transmission_line == line_state.transmission_line)
-            rhs = self.tep_model_params.disjunctive_parameter * (1 - candidate_line_investment_var)
+            rhs = self.tep_model.tep_scenarios_model_parameters.disjunctive_parameter * (
+                1 - candidate_line_investment_var)
             self.dc_power_flow_candidates[line_state] = \
                 self.create_grb_abs_constraint_pair(lhs, rhs, name='DCFlowDisj{}'.format(line_state))
             # max power flow binary formulation
@@ -653,46 +666,143 @@ class TepModelOneScenario(opf.ScenarioOpfModel):
     Inheriting from opf.ScenarioOpfModel allows using the summary class opf.ScenarioOpfModelResults"""
 
     def __init__(self, scenario,
-                 tep_system,
+                 tep_model,
                  line_investment_vars=None,
-                 tep_model_params=TepModelParameters(),
-                 model=grb.Model('')):
+                 model=None):
         # type: (powersys.PowerSystemScenario.PowerSystemScenario, OpfModelParameters, gurobipy.Model) -> None
         opf.ScenarioOpfModel.__init__(self, scenario,
-                                      opf_model_params=tep_model_params.opf_model_params,
+                                      opf_model_params=tep_model.tep_scenarios_model_parameters.opf_model_params,
                                       model=model)
-        self.tep_system = tep_system
-        self.tep_model_params = tep_model_params
+        self.tep_model = tep_model
         # Line investment variables
         self.line_investment_vars = line_investment_vars
 
     def build_model(self):
         if self.line_investment_vars is None:
             # Create line investment variables if they weren't provided
-            self.line_investment_vars = {}
-            for candidate_line in self.tep_system.candidate_lines_flat_list:
-                self.line_investment_vars[candidate_line] = \
-                    self.model.addVar(
-                        obj=candidate_line.investment_cost * self.tep_model_params.investment_costs_multiplier,
-                        vtype=grb.GRB.BINARY,
-                        name='y_{}'.format(candidate_line.transmission_line.name)
-                    )
-            self.model.update()  # Update model to integrate new variables
+            self.line_investment_vars = TepModelOneState.create_new_tx_investment_vars(
+                self.tep_model, self.model)
         super(TepModelOneScenario, self).build_model()
 
     def build_opf_model_one_state(self, state):
         """Overrides base method in order to minimize code modifications
         (this method will be called by opf.ScenarioOpfModel.__init__)"""
-        tep_model = TepModelOneState(state, self.tep_system,
+        tep_model = TepModelOneState(state, self.tep_model,
                                      line_investment_vars=self.line_investment_vars,
-                                     tep_model_params=self.tep_model_params,
                                      model=self.model)
         tep_model.build_model()
         return tep_model
 
-    def get_optimal_plan(self, tep_model):
+    def get_built_lines(self):
         investment_vars_value = self.get_grb_vars_solution(self.line_investment_vars)
-        built_lines = list(candidate_line for candidate_line in self.tep_system.candidate_lines_flat_list
+        built_lines = list(candidate_line for candidate_line in self.tep_model.tep_system.candidate_lines_flat_list
                            if investment_vars_value[candidate_line])
-        plan = StaticTePlan(tep_model, built_lines)
+        return built_lines
+
+    def get_optimal_plan(self):
+        plan = StaticTePlan(self.tep_model, self.get_built_lines())
         return plan
+
+
+class TepModelOneScenarioResults(opf.ScenarioOpfModelResults):
+    def __init__(self, tep_scenario_model):
+        # type: (TepModelOneScenario) -> None
+        opf.ScenarioOpfModelResults.__init__(self, tep_scenario_model)
+        self.summary_sol['Built Lines'] = ','.join(str(l) for l in tep_scenario_model.get_built_lines())
+        self.df_summary = pd.DataFrame(self.summary_sol, index=[self.model_scenario_name])
+        # TODO improve summary of tep solution (including investment costs, etc, mimmicking the StaticTePlanDetails)
+
+
+class TepStochasticModel(mygrb.GrbOptModel):
+    def __init__(self, tep_model,
+                 scenario_probabilities=None):
+        # type: (TepScenariosModel, List[float]) -> None
+        mygrb.GrbOptModel.__init__(self, model=grb.Model('StochasticTEP'))
+        self.tep_model = tep_model  # type: TepScenariosModel
+        self.scenario_probabilities = scenario_probabilities
+        if self.scenario_probabilities is None:
+            # by default scenarios are equally likely
+            num_scenarios = len(tep_model.tep_system.scenarios)
+            self.scenario_probabilities = dict(zip(tep_model.tep_system.scenarios,
+                                                   [1.0 / num_scenarios] * num_scenarios))
+        self.scenarios_tep_models = dict()
+        self.line_investment_vars = None
+
+    def build_model(self):
+        # Create line investment variables
+        self.line_investment_vars = TepModelOneState.create_new_tx_investment_vars(self.tep_model, self.model)
+        # Create stochastic TEP model with expected cost as objective function
+        for scenario in self.tep_model.tep_system.scenarios:
+            self.scenarios_tep_models[scenario] = TepModelOneScenario(scenario, self.tep_model,
+                                                                      line_investment_vars=self.line_investment_vars,
+                                                                      model=self.model)
+            self.scenarios_tep_models[scenario].build_model()
+        self.set_expected_cost_objective()
+        super(TepStochasticModel, self).build_model()
+
+    def set_expected_cost_objective(self):
+        obj_function = self.tep_model.tep_scenarios_model_parameters.investment_costs_multiplier * \
+                       sum(self.line_investment_vars[candidate_line] * candidate_line.investment_cost
+                           for candidate_line in self.tep_model.tep_system.candidate_lines_flat_list)
+        for scenario in self.tep_model.tep_system.scenarios:
+            # scenario-probability-weighted objective function
+            obj_function += self.scenario_probabilities[scenario] * \
+                            sum(self.scenarios_tep_models[scenario].opf_models[state].operation_cost
+                                for state in scenario.states)
+        self.model.setObjective(obj_function, grb.GRB.MINIMIZE)
+
+    def solve(self):
+        logging.info("Solving stochastic TEP with probabilities '{}'...".format(self.scenario_probabilities.values()))
+        obj_val = super(TepStochasticModel, self).solve()
+        logging.info(("Solved stochastic TEP with probabilities '{0}' (runtime: {2}). "
+                      "Expected cost = {1}"
+                      ).format(self.scenario_probabilities.values(),
+                               Utils.currency_to_str(obj_val),
+                               self.model.Runtime)
+                     )
+        scenarios_with_load_shedding = [scenario for scenario in self.tep_model.tep_system.scenarios
+                                        if self.scenarios_tep_models[scenario].get_total_load_shed() > 0]
+        if len(scenarios_with_load_shedding) > 0:
+            logging.info(('ATTENTION: load-shedding occurs in the optimal TEP solution in the following scenarios: '
+                          '{}. Scenario probabilities = {}').
+                         format(','.join(map(str, scenarios_with_load_shedding)),
+                                self.scenario_probabilities.values())
+                         )
+        return obj_val
+
+    def modify_and_solve(self, scenario_probabilities):
+        self.scenario_probabilities = scenario_probabilities
+        self.set_expected_cost_objective()
+        obj_val = self.solve()
+        return obj_val
+
+    def get_built_lines(self):
+        investment_vars_value = self.get_grb_vars_solution(self.line_investment_vars)
+        built_lines = list(candidate_line for candidate_line in self.tep_model.tep_system.candidate_lines_flat_list
+                           if investment_vars_value[candidate_line])
+        return built_lines
+
+    def get_optimal_plan(self):
+        plan = StaticTePlan(self.tep_model, self.get_built_lines())
+        return plan
+
+
+# PARETO FRONT STOCHASTIC ###########################################################################################
+class ScenariosTepStochasticParetoFrontBuilder(ScenariosTepParetoFrontBuilder):
+    def __init__(self, tep_model,
+                 probability_steps=10):
+        ScenariosTepParetoFrontBuilder.__init__(self, tep_model)
+        self.probability_steps = probability_steps
+        self.step_model = TepStochasticModel(self.tep_model, scenario_probabilities=None)
+        self.step_model.build_model()
+
+    def build_pareto_front(self):
+        probability_points_to_eval = Utils.generate_probability_grid(len(self.tep_model.tep_system.scenarios),
+                                                                     self.probability_steps)
+        for probabilities in probability_points_to_eval:
+            scenario_probabilities = dict(zip(self.tep_model.tep_system.scenarios, probabilities))
+            self.step_model.modify_and_solve(scenario_probabilities)
+            step_optimal_plan = self.step_model.get_optimal_plan()
+            if all(not step_optimal_plan.is_equivalent(other_plan)
+                   for other_plan in self.efficient_alternatives):
+                self.efficient_alternatives.append(step_optimal_plan)

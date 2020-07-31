@@ -1,6 +1,6 @@
-import gurobipy as grb
-import GrbOptModel as mygrb
-import OpfModel as opf
+from tepmodel import OptModels as opt
+from tepmodel import OpfModels as opf
+import pyomo.environ as pyo
 import powersys.PowerSystemPlanning as pwsp
 import Utils
 import plotly
@@ -31,7 +31,7 @@ class TepModelParameters(object):
     @staticmethod
     def import_from_dict(dict_params):
         tep_params = TepModelParameters()
-        for key, value in dict_params.iteritems():
+        for key, value in dict_params.items():
             if key.startswith('tep_params'):
                 opf_param_name = key[key.find('.') + 1:]
                 if opf_param_name == 'slack_bus_name' and isinstance(value, float):
@@ -564,7 +564,7 @@ class TepModelOneState(opf.OpfModel):
     def __init__(self, state, tep_system,
                  line_investment_vars=None,
                  tep_model_params=TepModelParameters(),
-                 model=grb.Model('')):
+                 model=pyo.ConcreteModel('UnnamedTepOpfModel')):
         opf.OpfModel.__init__(self,
                               state,
                               opf_model_params=tep_model_params.opf_model_params,
@@ -589,7 +589,7 @@ class TepModelOneState(opf.OpfModel):
                 self.line_investment_vars[candidate_line] = \
                     self.model.addVar(
                         obj=candidate_line.investment_cost * self.tep_model_params.investment_costs_multiplier,
-                        vtype=grb.GRB.BINARY,
+                        vtype=pyo.Binary,
                         name='y_{}'.format(candidate_line.transmission_line.name)
                     )
             self.model.update()  # Update model to integrate new variables
@@ -656,7 +656,7 @@ class TepModelOneScenario(opf.ScenarioOpfModel):
                  tep_system,
                  line_investment_vars=None,
                  tep_model_params=TepModelParameters(),
-                 model=grb.Model('')):
+                 model=pyo.ConcreteModel('UnnamedTepOneScenarioModel')):
         # type: (powersys.PowerSystemScenario.PowerSystemScenario, OpfModelParameters, gurobipy.Model) -> None
         opf.ScenarioOpfModel.__init__(self, scenario,
                                       opf_model_params=tep_model_params.opf_model_params,
@@ -674,7 +674,7 @@ class TepModelOneScenario(opf.ScenarioOpfModel):
                 self.line_investment_vars[candidate_line] = \
                     self.model.addVar(
                         obj=candidate_line.investment_cost * self.tep_model_params.investment_costs_multiplier,
-                        vtype=grb.GRB.BINARY,
+                        vtype=pyo.Binary,
                         name='y_{}'.format(candidate_line.transmission_line.name)
                     )
             self.model.update()  # Update model to integrate new variables

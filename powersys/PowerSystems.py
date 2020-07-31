@@ -30,7 +30,7 @@ class PowerSystem(object):
         name = os.path.splitext(os.path.basename(excel_filepath))[0]
         imported_system = PowerSystem(name)  # type: PowerSystem
         # import nodes
-        df_nodes = pd.read_excel(excel_filepath, sheetname="Nodes")
+        df_nodes = pd.read_excel(excel_filepath, sheet_name="Nodes")
         for index, row in df_nodes.iterrows():
             node_name = row['name']
             if isinstance(node_name, numbers.Number):
@@ -40,7 +40,7 @@ class PowerSystem(object):
                         row['load'])
             imported_system.nodes.append(node)
         # import generators
-        df_generators = pd.read_excel(excel_filepath, sheetname="Generators")
+        df_generators = pd.read_excel(excel_filepath, sheet_name="Generators")
         for index, row in df_generators.iterrows():
             connection_node = imported_system.find_node(row['node'])
             generator = Generator(imported_system,
@@ -50,7 +50,7 @@ class PowerSystem(object):
                                   row['generation_marginal_cost'])
             imported_system.generators.append(generator)
         # import transmission lines
-        df_lines = pd.read_excel(excel_filepath, sheetname="TransmissionLines")
+        df_lines = pd.read_excel(excel_filepath, sheet_name="TransmissionLines")
         for index, row in df_lines.iterrows():
             if not row['is_new']:  # new transmission lines are added elsewhere
                 line = TransmissionLine(imported_system,
@@ -73,6 +73,10 @@ class PowerSystemElement(object):
 
     def __str__(self):
         return self.name
+
+    def __lt__(self, other):
+        # Only needed to avoid Pyomo errors when it attempts to print the model to an *.LP file (it attempts to sort sets)
+        return self.name < other.name
 
 
 class Node(PowerSystemElement):

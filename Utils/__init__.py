@@ -1,3 +1,3 @@
-from Utils import *
-from DataUtils import *
-from ConsoleUtils import *
+from .Utils import *
+from .DataUtils import *
+from .ConsoleUtils import *

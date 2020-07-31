@@ -1,8 +1,8 @@
 """Power system planning classes"""
 from tempfile import _candidate_tempdir_list
 
-from PowerSystemScenario import PowerSystemScenario
-import PowerSystem as pws
+from .PowerSystemScenarios import PowerSystemScenario
+from .PowerSystems import *
 import pandas as pd
 import itertools
 
@@ -18,14 +18,14 @@ class CandidateTransmissionLine(object):
     def create_candidate_lines(system, excel_filepath):
         # type: (PowerSystem, unicode) -> List[List[CandidateTransmissionLine]]
         """Import candidate transmission lines (both in new and existing corridors)"""
-        df_candidate_lines = pd.read_excel(excel_filepath, sheetname="TransmissionLines")
+        df_candidate_lines = pd.read_excel(excel_filepath, sheet_name="TransmissionLines")
         candidate_lines = []
         for index, row in df_candidate_lines.iterrows():
             max_new_lines = row['max_new_lines']
             if max_new_lines > 0:
                 investment_cost = row['investment_cost']
                 if row['is_new']:
-                    transmission_line = pws.TransmissionLine(system,
+                    transmission_line = TransmissionLine(system,
                                                              row['name'],
                                                              system.find_node(row['node_from']),
                                                              system.find_node(row['node_to']),
@@ -38,7 +38,7 @@ class CandidateTransmissionLine(object):
                 candidates_lines_this_group = []
                 for i in range(max_new_lines):
                     new_line_name = transmission_line.name + "_TC{}".format(i + 1)
-                    new_line = pws.TransmissionLine.copy_line(transmission_line, new_line_name)
+                    new_line = TransmissionLine.copy_line(transmission_line, new_line_name)
                     system.transmission_lines.append(new_line)
                     candidates_lines_this_group.append(CandidateTransmissionLine(new_line, investment_cost))
                 candidate_lines.append(candidates_lines_this_group)
@@ -94,7 +94,7 @@ class PowerSystemTransmissionPlanning(object):
     def import_from_excel(excel_filepath):
         # type: (str) -> PowerSystemTransmissionPlanning
         # import power system
-        system = pws.PowerSystem.import_from_excel(excel_filepath)
+        system = PowerSystem.import_from_excel(excel_filepath)
         # import candidate transmission lines
         #   A list of groups of equivalent candidate transmission lines is created
         #   For each candidate line, a new transmission line is also created in the base power system

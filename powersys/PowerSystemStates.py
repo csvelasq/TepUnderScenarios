@@ -1,4 +1,4 @@
-import PowerSystem
+from . import PowerSystems
 
 
 class PowerSystemState(object):
@@ -42,11 +42,15 @@ class PowerSystemElementState(object):
     def __init__(self, system_state, element):
         assert isinstance(system_state, PowerSystemState)
         self.system_state = system_state
-        assert isinstance(element, PowerSystem.PowerSystemElement)
+        assert isinstance(element, PowerSystems.PowerSystemElement)
         self.element = element
 
     def __str__(self):
         return self.element.name + "_" + self.system_state.name
+
+    def __lt__(self, other):
+        # Only needed to avoid Pyomo errors when it attempts to print the model to an *.LP file (it attempts to sort sets)
+        return self.element < other.element
 
 
 class NodeState(PowerSystemElementState):
@@ -87,13 +91,15 @@ class GeneratorState(PowerSystemElementState):
             self.generation_marginal_cost = generator.generation_marginal_cost
         else:
             self.generation_marginal_cost = generation_marginal_cost
+        self.generation_cost = self.generation_marginal_cost * self.system_state.duration
 
 
 class TransmissionLineState(PowerSystemElementState):
     def __init__(self, system_state, transmission_line, isavailable):
-        assert isinstance(transmission_line, PowerSystem.TransmissionLine)
+        assert isinstance(transmission_line, PowerSystems.TransmissionLine)
         PowerSystemElementState.__init__(self, system_state, transmission_line)
         self.transmission_line = transmission_line
         self.node_from_state = system_state.find_node_state(transmission_line.node_from)
         self.node_to_state = system_state.find_node_state(transmission_line.node_to)
         self.isavailable = isavailable
+        self.thermal_capacity = self.isavailable * self.transmission_line.thermal_capacity

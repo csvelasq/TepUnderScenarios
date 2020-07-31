@@ -5,7 +5,7 @@ from xlsxwriter.utility import xl_col_to_name
 
 
 def excel_worksheet_to_dict(excel_filepath, sheetname):
-    df = pd.read_excel(excel_filepath, sheetname=sheetname)
+    df = pd.read_excel(excel_filepath, sheet_name=sheetname)
     d = dict()
     for index, row in df.iterrows():
         d[row['PARAMETER']] = row['VALUE']

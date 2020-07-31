@@ -1,4 +1,4 @@
-import DataUtils
+from . import DataUtils
 
 
 def get_yesno_answer_console(message="Proceed (y/n)?: ", default_answer=True):
@@ -6,7 +6,7 @@ def get_yesno_answer_console(message="Proceed (y/n)?: ", default_answer=True):
     answer_bool = None
     msg = message + " [{}] ".format('y' if default_answer else 'n')
     while answer_bool is None:
-        answer = raw_input(msg)
+        answer = input(msg)
         if answer == "":
             answer_bool = default_answer
         elif answer == 'y':
@@ -14,7 +14,7 @@ def get_yesno_answer_console(message="Proceed (y/n)?: ", default_answer=True):
         elif answer == 'n':
             answer_bool = False
         else:
-            print "Yes or no answers only"
+            print("Yes or no answers only")
     return answer_bool
 
 
@@ -22,13 +22,13 @@ def get_selection_answer(message="Select one of the following options: ", option
     answer = None
     msg = message + "{} [{}] ".format(str(options), default_answer)
     while answer is None:
-        answer = raw_input(msg)
+        answer = input(msg)
         if answer == "":
             return default_answer
         elif answer in [str(opt) for opt in options]:
             return [opt for opt in options if str(opt) == answer][0]
         else:
-            print "Please write one of the possible options"
+            print("Please write one of the possible options")
             answer = None
 
 
@@ -48,7 +48,7 @@ def try_save_file(filename, filesaver):
         try:
             filesaver(filename)
         except IOError:
-            retry_input = raw_input("Could not save file '%s'. Retry (y/n)? [y]" % (filename,))
+            retry_input = input("Could not save file '%s'. Retry (y/n)? [y]" % (filename,))
             retry_input = retry_input.lower()
             if not (retry_input == "" or retry_input == "y"):
                 return False
@@ -60,4 +60,4 @@ def try_save_file(filename, filesaver):
 def print_scalar_attributes_to_console(obj_instance):
     """Prints all scalar attributes (i.e. of type int, float or str) of obj_instance to console"""
     for key, val in DataUtils.get_scalar_attributes(obj_instance).iteritems():
-        print "{0}: {1}".format(key, val)
+        print("{0}: {1}".format(key, val))
